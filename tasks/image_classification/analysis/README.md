@@ -5,3 +5,9 @@ This folder contains the analysis code for the image classifcation experiments. 
 ```
 python -m tasks.image_classification.analysis.run_imagenet_analysis
 ```
+
+To cache ImageNet mistakes (predictions and confidence traces) run:
+
+```
+python -m tasks.image_classification.analysis.run_imagenet_mistake_analysis --checkpoint <imagenet_checkpoint>
+```
