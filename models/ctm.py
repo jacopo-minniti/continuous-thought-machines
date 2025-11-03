@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import numpy as np
 import math
+from typing import Callable, Optional
 from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
 
 from models.modules import ParityBackbone, SynapseUNET, Squeeze, SuperLinear, LearnableFourierPositionalEncoding, MultiLearnableFourierPositionalEncoding, CustomRotationalEmbedding, CustomRotationalEmbedding1D, ShallowWide
@@ -528,7 +529,14 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
 
 
-    def forward(self, x, track=False):
+    def forward(
+        self,
+        x,
+        track=False,
+        dwell_threshold: Optional[float] = None,
+        dwell_steps: int = 0,
+        dwell_log_fn: Optional[Callable[[str], None]] = None,
+    ):
         B = x.size(0)
         device = x.device
 
@@ -558,7 +566,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
         _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
         # Compute learned weighting for synchronisation
-        
+
         base_temperature = getattr(self, "attention_temperature", 1.0)
         if base_temperature <= 0:
             raise ValueError("attention_temperature must be positive.")
@@ -569,11 +577,24 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             dtype=kv.dtype,
         )
 
+        dwell_active = dwell_threshold is not None and dwell_threshold > 0 and dwell_steps > 0
+        if dwell_active and dwell_log_fn is None:
+            dwell_log_fn = print
+        dwell_stats = {
+            "triggered_steps": 0,
+            "total_triggered_samples": 0,
+            "total_improved_samples": 0,
+            "batch_size": B,
+            "iterations": self.iterations,
+        } if dwell_active else None
+        prev_entropy = None
+
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
+            synchronisation_action_for_tracking = synchronisation_action
 
             # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
@@ -581,6 +602,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
             pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            frozen_attn_out = attn_out
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -599,6 +621,53 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
             current_certainty = self.compute_certainty(current_prediction)
+            entropy = current_certainty[:, 0].clamp(0.0, 1.0)
+            entropy_before_loop = entropy.clone()
+
+            if dwell_active and prev_entropy is not None:
+                delta_entropy = entropy - prev_entropy
+                trigger_mask = delta_entropy > dwell_threshold
+                if torch.any(trigger_mask):
+                    if dwell_stats is not None:
+                        dwell_stats["triggered_steps"] += 1
+                        dwell_stats["total_triggered_samples"] += int(trigger_mask.sum().item())
+
+                    for _ in range(dwell_steps):
+                        synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(
+                            activated_state,
+                            decay_alpha_action,
+                            decay_beta_action,
+                            r_action,
+                            synch_type='action',
+                        )
+                        pre_synapse_input = torch.concatenate((frozen_attn_out, activated_state), dim=-1)
+                        state = self.synapses(pre_synapse_input)
+                        state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
+                        activated_state = self.trace_processor(state_trace)
+                        synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
+                            activated_state,
+                            decay_alpha_out,
+                            decay_beta_out,
+                            r_out,
+                            synch_type='out',
+                        )
+                        current_prediction = self.output_projector(synchronisation_out)
+                        current_certainty = self.compute_certainty(current_prediction)
+                        entropy = current_certainty[:, 0].clamp(0.0, 1.0)
+
+                    if dwell_stats is not None:
+                        improved_mask = torch.zeros_like(trigger_mask)
+                        improved_mask[trigger_mask] = entropy[trigger_mask] < entropy_before_loop[trigger_mask]
+                        dwell_stats["total_improved_samples"] += int(improved_mask.sum().item())
+                    if dwell_log_fn is not None:
+                        triggered = int(trigger_mask.sum().item())
+                        if triggered > 0:
+                            improved = int((entropy[trigger_mask] < entropy_before_loop[trigger_mask]).sum().item())
+                            before_mean = float(entropy_before_loop[trigger_mask].mean().item())
+                            after_mean = float(entropy[trigger_mask].mean().item())
+                            dwell_log_fn(
+                                f"[DWELL] step={stepi} triggered={triggered}/{B} improved={improved} mean_entropy={before_mean:.4f}->{after_mean:.4f}"
+                            )
 
             predictions[..., stepi] = current_prediction
             certainties[..., stepi] = current_certainty
@@ -609,15 +678,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 post_activations_tracking.append(activated_state.detach().cpu().numpy())
                 attention_tracking.append(attn_weights.detach().cpu().numpy())
                 synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
-                synch_action_tracking.append(synchronisation_action.detach().cpu().numpy())
+                synch_action_tracking.append(synchronisation_action_for_tracking.detach().cpu().numpy())
+
+            prev_entropy = entropy.detach()
 
             if stepi < self.iterations - 1:
-                entropy = current_certainty[:, 0].clamp(0.0, 1.0)
                 # next_temperature = 1.5 + entropy  # maps [0,1] -> [1.5,2.5]
                 next_temperature = torch.ones_like(entropy)
                 current_temperature = next_temperature.view(B, 1, 1).detach()
 
         # --- Return Values ---
+        self.last_dwell_stats = dwell_stats if dwell_active else None
         if track:
             return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
         return predictions, certainties, synchronisation_out

@@ -26,6 +26,8 @@ python -m tasks.image_classification.analysis.run_imagenet_mistake_analysis \
   --batch-size 128 \
   --device 0 \
   --inference-iterations 50 \
+  --dwell-threshold 0.05 \
+  --dwell-steps 3
 
 
 # run --time=00:05:00 --gpus-per-node=h100:1     .venv/bin/python -m tasks.image_classification.analysis.run_imagenet_analysis     --debug     --actions videos     --data_indices 0 1 2 --device 0

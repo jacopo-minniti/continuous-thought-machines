@@ -64,6 +64,18 @@ def parse_args() -> argparse.Namespace:
         help="Override number of CTM internal ticks used during inference.",
     )
     parser.add_argument(
+        "--dwell-threshold",
+        type=float,
+        default=None,
+        help="Entropy increase threshold (ΔU) that triggers dwell mode; disabled if unset.",
+    )
+    parser.add_argument(
+        "--dwell-steps",
+        type=int,
+        default=0,
+        help="Number of additional ticks to run when dwell mode triggers.",
+    )
+    parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
@@ -211,6 +223,17 @@ def main():
 
     processed = 0
     total_wrong = 0
+    dwell_enabled = args.dwell_threshold is not None and args.dwell_steps > 0
+    if dwell_enabled:
+        print(f"Dwell mode enabled: threshold={args.dwell_threshold} steps={args.dwell_steps}")
+        dwell_summary = {
+            "triggered_steps": 0,
+            "triggered_samples": 0,
+            "improved_samples": 0,
+            "evaluated_comparisons": 0,
+        }
+    else:
+        dwell_summary = None
     with torch.inference_mode():
         pbar = tqdm(loader, desc="Evaluating", dynamic_ncols=True)
         for batch_idx, (inputs, targets) in enumerate(pbar):
@@ -227,7 +250,29 @@ def main():
             inputs = inputs.to(device)
             targets = targets.to(device)
 
-            predictions, certainties, _ = model(inputs)
+            dwell_kwargs = {}
+            if dwell_enabled:
+                def dwell_log(message, batch_id=batch_idx):
+                    print(f"[batch={batch_id}] {message}")
+
+                dwell_kwargs = {
+                    "dwell_threshold": args.dwell_threshold,
+                    "dwell_steps": args.dwell_steps,
+                    "dwell_log_fn": dwell_log,
+                }
+
+            predictions, certainties, _ = model(inputs, **dwell_kwargs) if dwell_kwargs else model(inputs)
+
+            if dwell_enabled and dwell_summary is not None:
+                stats = getattr(model, "last_dwell_stats", None)
+                if stats:
+                    dwell_summary["triggered_steps"] += int(stats.get("triggered_steps", 0))
+                    dwell_summary["triggered_samples"] += int(stats.get("total_triggered_samples", 0))
+                    dwell_summary["improved_samples"] += int(stats.get("total_improved_samples", 0))
+                    batch_size_stats = int(stats.get("batch_size", batch_size))
+                    iterations_stats = int(stats.get("iterations", model.iterations))
+                    comparisons = max(iterations_stats - 1, 0) * batch_size_stats
+                    dwell_summary["evaluated_comparisons"] += comparisons
 
             probs = torch.softmax(predictions, dim=1)
             entropies = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
@@ -273,6 +318,29 @@ def main():
 
             processed += batch_size
             pbar.set_postfix(processed=processed, batches=math.ceil(processed / args.batch_size))
+
+    if dwell_enabled and dwell_summary is not None:
+        total_comparisons = dwell_summary["evaluated_comparisons"]
+        triggered_samples = dwell_summary["triggered_samples"]
+        improved_samples = dwell_summary["improved_samples"]
+        trigger_rate = triggered_samples / total_comparisons if total_comparisons else 0.0
+        improvement_rate = improved_samples / triggered_samples if triggered_samples else 0.0
+        dwell_summary_output = {
+            "triggered_steps": dwell_summary["triggered_steps"],
+            "triggered_samples": triggered_samples,
+            "improved_samples": improved_samples,
+            "evaluated_comparisons": total_comparisons,
+            "trigger_rate": trigger_rate,
+            "improvement_rate": improvement_rate,
+        }
+        print(
+            "Dwell summary → steps="
+            f"{dwell_summary_output['triggered_steps']} samples_triggered={triggered_samples} "
+            f"improved_samples={improved_samples} trigger_rate={trigger_rate:.4%}"
+            f" improvement_rate={improvement_rate:.4%}"
+        )
+    else:
+        dwell_summary_output = None
 
     indices_wrong_np = np.concatenate(indices_wrong, axis=0) if indices_wrong else np.empty(0, dtype=np.int64)
     targets_wrong_np = np.concatenate(targets_wrong, axis=0) if targets_wrong else np.empty(0, dtype=np.int64)
@@ -343,7 +411,11 @@ def main():
         "dataset_mean": dataset_mean,
         "dataset_std": dataset_std,
         "store_all": bool(args.store_all),
+        "dwell_threshold": None if args.dwell_threshold is None else float(args.dwell_threshold),
+        "dwell_steps": int(args.dwell_steps),
     }
+    if dwell_summary_output is not None:
+        summary["dwell_stats"] = dwell_summary_output
     with (output_dir / "summary.json").open("w", encoding="utf-8") as jf:
         json.dump(summary, jf, indent=2)
 
