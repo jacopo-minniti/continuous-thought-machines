@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('--actions', type=str, nargs='+', default=['videos'], choices=['plots', 'videos', 'demo'], help="Actions to take. Plots=results plots; videos=gifs/mp4s to watch attention; demo: last frame of internal ticks")
     parser.add_argument('--device', type=int, nargs='+', default=[-1], help="GPU device index or -1 for CPU")
     
-    parser.add_argument('--checkpoint', type=str, default='checkpoints/imagenet/ctm_clean.pt', help="Path to ATM checkpoint")
+    parser.add_argument('--checkpoint', type=str, default='checkpoints/imagenet/ctm.pt', help="Path to ATM checkpoint")
     parser.add_argument('--output_dir', type=str, default='tasks/image_classification/analysis/outputs/imagenet_viz', help="Directory for visualization outputs")
     parser.add_argument('--debug', action=argparse.BooleanOptionalAction, default=True, help='Debug mode: use CIFAR100 instead of ImageNet for debugging.')
     parser.add_argument('--plot_every', type=int, default=10, help="How often to plot.")

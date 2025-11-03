@@ -613,7 +613,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
             if stepi < self.iterations - 1:
                 entropy = current_certainty[:, 0].clamp(0.0, 1.0)
-                next_temperature = 0.5 + entropy  # maps [0,1] -> [0.5,1.5]
+                # next_temperature = 1.5 + entropy  # maps [0,1] -> [1.5,2.5]
+                next_temperature = torch.ones_like(entropy)
                 current_temperature = next_temperature.view(B, 1, 1).detach()
 
         # --- Return Values ---
