@@ -74,6 +74,7 @@ def parse_args():
     parser.add_argument('--inference_iterations', type=int, default=50, help="Iterations to use during inference.")
     parser.add_argument('--data_indices', type=int, nargs='+', default=[], help="Use specific indices in validation data for demos, otherwise random.")
     parser.add_argument('--N_to_viz', type=int, default=5, help="When not supplying data_indices.")
+    parser.add_argument('--attention_temperature', type=float, default=None, help="Temperature multiplier for attention logits (values >1 sharpen focus, <1 smooth). Defaults to checkpoint value.")
     
     return parser.parse_args()
 
@@ -99,6 +100,10 @@ if __name__=='__main__':
         model_args.backbone_type = f'{model_args.resnet_type}-{getattr(model_args, "resnet_feature_scales", [4])[-1]}'
     if not hasattr(model_args, 'neuron_select_type'):
         model_args.neuron_select_type = 'first-last'
+    if not hasattr(model_args, 'attention_temperature'):
+        model_args.attention_temperature = 1.0
+
+    attn_temperature = args.attention_temperature if args.attention_temperature is not None else model_args.attention_temperature
 
 
     # Instantiate Model based on checkpoint args
@@ -122,12 +127,15 @@ if __name__=='__main__':
         dropout=0, # No dropout for eval
         neuron_select_type=model_args.neuron_select_type,
         n_random_pairing_self=model_args.n_random_pairing_self,
+        attention_temperature=attn_temperature,
     ).to(device)
 
     # Load weights into model
     load_result = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     print(f" Loaded state_dict. Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}")
     model.eval() # Set model to evaluation mode
+    model.attention_temperature = attn_temperature
+    print(f"Attention temperature set to {model.attention_temperature:.4f}")
 
     # --- Prepare Dataset ---
     if args.debug:

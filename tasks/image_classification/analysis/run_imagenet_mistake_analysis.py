@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -80,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="If set, keep predictions/certainties for every example instead of only mistakes.",
     )
+    parser.add_argument(
+        "--attention-temperature",
+        type=float,
+        default=None,
+        help="Temperature multiplier for attention logits (values >1 sharpen, <1 smooth). Defaults to checkpoint value.",
+    )
     return parser.parse_args()
 
 
@@ -99,7 +106,11 @@ def load_imagenet(split: str, resize: int):
     return dataset, mean, std, class_labels
 
 
-def instantiate_model(checkpoint_path: str, device: torch.device) -> ContinuousThoughtMachine:
+def instantiate_model(
+    checkpoint_path: str,
+    device: torch.device,
+    attention_temperature: Optional[float] = None,
+) -> ContinuousThoughtMachine:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cargs = checkpoint["args"]
 
@@ -108,6 +119,10 @@ def instantiate_model(checkpoint_path: str, device: torch.device) -> ContinuousT
         cargs.backbone_type = f"{cargs.resnet_type}-{suffix}"
     if not hasattr(cargs, "neuron_select_type"):
         cargs.neuron_select_type = "first-last"
+    if not hasattr(cargs, "attention_temperature"):
+        cargs.attention_temperature = 1.0
+
+    attn_temperature = attention_temperature if attention_temperature is not None else cargs.attention_temperature
 
     model = ContinuousThoughtMachine(
         iterations=cargs.iterations,
@@ -128,12 +143,14 @@ def instantiate_model(checkpoint_path: str, device: torch.device) -> ContinuousT
         dropout=0.0,
         neuron_select_type=cargs.neuron_select_type,
         n_random_pairing_self=cargs.n_random_pairing_self,
+        attention_temperature=attn_temperature,
     ).to(device)
 
     load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     if load_result.missing_keys or load_result.unexpected_keys:
         print(f"WARNING: load_state_dict missing={load_result.missing_keys}, unexpected={load_result.unexpected_keys}")
 
+    model.attention_temperature = attn_temperature
     model.eval()
     return model
 
@@ -160,7 +177,8 @@ def main():
         pin_memory=device.type == "cuda",
     )
 
-    model = instantiate_model(args.checkpoint, device)
+    model = instantiate_model(args.checkpoint, device, attention_temperature=args.attention_temperature)
+    print(f"Using attention temperature: {model.attention_temperature:.4f}")
     if args.inference_iterations is not None:
         if model.iterations != args.inference_iterations:
             print(f"Overriding model iterations: {model.iterations} -> {args.inference_iterations}")
@@ -320,6 +338,7 @@ def main():
         "split": args.split,
         "checkpoint": args.checkpoint,
         "inference_iterations": int(model.iterations),
+        "attention_temperature": float(model.attention_temperature),
         "class_labels": class_labels,
         "dataset_mean": dataset_mean,
         "dataset_std": dataset_std,
