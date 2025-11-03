@@ -24,5 +24,4 @@ python -m tasks.image_classification.analysis.run_imagenet_mistake_analysis \
   --output-dir tasks/image_classification/analysis/outputs/imagenet_mistakes \
   --batch-size 128 \
   --device 0 \
-  --inference-iterations 50 \
-  --store-all
+  --inference-iterations 50

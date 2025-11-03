@@ -169,17 +169,30 @@ def main():
     total_samples = len(dataset) if args.max_samples is None else min(args.max_samples, len(dataset))
     print(f"Evaluating {total_samples} samples from ImageNet {args.split}.")
 
-    all_predictions = []
-    all_certainties = []
-    all_entropies = []
-    all_targets = []
-    all_indices = []
-    final_preds = []
-    final_certainties = []
-    max_certainties = []
-    max_certainty_tick = []
+    indices_wrong = []
+    targets_wrong = []
+    preds_wrong = []
+    certainty_last_wrong = []
+    certainty_max_wrong = []
+    certainty_tick_wrong = []
+    entropies_wrong = []
+    predictions_wrong_batches = []
+    certainties_wrong_batches = []
+
+    store_all_payload = args.store_all
+    if store_all_payload:
+        predictions_all = []
+        certainties_all = []
+        entropies_all = []
+        targets_all = []
+        indices_all = []
+        final_preds_all = []
+        final_certainties_all = []
+        max_certainties_all = []
+        max_certainty_tick_all = []
 
     processed = 0
+    total_wrong = 0
     with torch.inference_mode():
         pbar = tqdm(loader, desc="Evaluating", dynamic_ncols=True)
         for batch_idx, (inputs, targets) in enumerate(pbar):
@@ -206,56 +219,76 @@ def main():
             certainty_last = certainty_signal[:, -1]
             certainty_max, certainty_tick = certainty_signal.max(dim=1)
 
-            start_index = batch_idx * args.batch_size
-            indices = torch.arange(start_index, start_index + batch_size)
+            start_index = processed
+            batch_indices = torch.arange(start_index, start_index + batch_size)
 
-            all_predictions.append(predictions.detach().cpu().numpy())
-            all_certainties.append(certainties.detach().cpu().numpy())
-            all_entropies.append(entropies.detach().cpu().numpy())
-            all_targets.append(targets.detach().cpu().numpy())
-            all_indices.append(indices.numpy())
-            final_preds.append(preds_last.detach().cpu().numpy())
-            final_certainties.append(certainty_last.detach().cpu().numpy())
-            max_certainties.append(certainty_max.detach().cpu().numpy())
-            max_certainty_tick.append(certainty_tick.detach().cpu().numpy())
+            wrong_mask = preds_last != targets
+            wrong_count = wrong_mask.sum().item()
+            total_wrong += wrong_count
+
+            if wrong_count > 0:
+                indices_wrong.append(batch_indices[wrong_mask].cpu().numpy())
+                targets_wrong.append(targets[wrong_mask].cpu().numpy())
+                preds_wrong.append(preds_last[wrong_mask].cpu().numpy())
+                certainty_last_wrong.append(certainty_last[wrong_mask].cpu().numpy())
+                certainty_max_wrong.append(certainty_max[wrong_mask].cpu().numpy())
+                certainty_tick_wrong.append(certainty_tick[wrong_mask].cpu().numpy())
+                entropies_wrong.append(entropies[wrong_mask].cpu().numpy())
+                predictions_wrong_batches.append(predictions[wrong_mask].detach().cpu().numpy())
+                certainties_wrong_batches.append(certainties[wrong_mask].detach().cpu().numpy())
+
+            if store_all_payload:
+                predictions_all.append(predictions.detach().cpu().numpy())
+                certainties_all.append(certainties.detach().cpu().numpy())
+                entropies_all.append(entropies.detach().cpu().numpy())
+                targets_all.append(targets.detach().cpu().numpy())
+                indices_all.append(batch_indices.cpu().numpy())
+                final_preds_all.append(preds_last.detach().cpu().numpy())
+                final_certainties_all.append(certainty_last.detach().cpu().numpy())
+                max_certainties_all.append(certainty_max.detach().cpu().numpy())
+                max_certainty_tick_all.append(certainty_tick.detach().cpu().numpy())
 
             processed += batch_size
             pbar.set_postfix(processed=processed, batches=math.ceil(processed / args.batch_size))
 
-    predictions_np = np.concatenate(all_predictions, axis=0)
-    certainties_np = np.concatenate(all_certainties, axis=0)
-    entropies_np = np.concatenate(all_entropies, axis=0)
-    targets_np = np.concatenate(all_targets, axis=0)
-    indices_np = np.concatenate(all_indices, axis=0)
-    final_preds_np = np.concatenate(final_preds, axis=0)
-    final_certainties_np = np.concatenate(final_certainties, axis=0)
-    max_certainties_np = np.concatenate(max_certainties, axis=0)
-    max_certainty_tick_np = np.concatenate(max_certainty_tick, axis=0)
+    indices_wrong_np = np.concatenate(indices_wrong, axis=0) if indices_wrong else np.empty(0, dtype=np.int64)
+    targets_wrong_np = np.concatenate(targets_wrong, axis=0) if targets_wrong else np.empty(0, dtype=np.int64)
+    preds_wrong_np = np.concatenate(preds_wrong, axis=0) if preds_wrong else np.empty(0, dtype=np.int64)
+    certainty_last_wrong_np = np.concatenate(certainty_last_wrong, axis=0) if certainty_last_wrong else np.empty(0, dtype=np.float32)
+    certainty_max_wrong_np = np.concatenate(certainty_max_wrong, axis=0) if certainty_max_wrong else np.empty(0, dtype=np.float32)
+    certainty_tick_wrong_np = np.concatenate(certainty_tick_wrong, axis=0) if certainty_tick_wrong else np.empty(0, dtype=np.int64)
+    entropies_wrong_np = np.concatenate(entropies_wrong, axis=0) if entropies_wrong else np.empty(0, dtype=np.float32)
 
-    wrong_mask = final_preds_np != targets_np
-    n_wrong = int(wrong_mask.sum())
-    accuracy = 1.0 - n_wrong / predictions_np.shape[0]
+    accuracy = 1.0 - total_wrong / processed if processed else 0.0
 
     mistakes_payload = {
-        "indices": indices_np[wrong_mask],
-        "targets": targets_np[wrong_mask],
-        "predictions_last": final_preds_np[wrong_mask],
-        "certainty_last": final_certainties_np[wrong_mask],
-        "certainty_max": max_certainties_np[wrong_mask],
-        "certainty_max_tick": max_certainty_tick_np[wrong_mask],
-        "entropy": entropies_np[wrong_mask],
+        "indices": indices_wrong_np,
+        "targets": targets_wrong_np,
+        "predictions_last": preds_wrong_np,
+        "certainty_last": certainty_last_wrong_np,
+        "certainty_max": certainty_max_wrong_np,
+        "certainty_max_tick": certainty_tick_wrong_np,
+        "entropy": entropies_wrong_np,
     }
 
-    if args.store_all:
-        mistakes_payload["predictions_all"] = predictions_np
-        mistakes_payload["certainties_all"] = certainties_np
-        mistakes_payload["entropies_all"] = entropies_np
-        mistakes_payload["targets_all"] = targets_np
-        mistakes_payload["indices_all"] = indices_np
+    if store_all_payload:
+        mistakes_payload["predictions_all"] = np.concatenate(predictions_all, axis=0)
+        mistakes_payload["certainties_all"] = np.concatenate(certainties_all, axis=0)
+        mistakes_payload["entropies_all"] = np.concatenate(entropies_all, axis=0)
+        mistakes_payload["targets_all"] = np.concatenate(targets_all, axis=0)
+        mistakes_payload["indices_all"] = np.concatenate(indices_all, axis=0)
+        mistakes_payload["predictions_last_all"] = np.concatenate(final_preds_all, axis=0)
+        mistakes_payload["certainty_last_all"] = np.concatenate(final_certainties_all, axis=0)
+        mistakes_payload["certainty_max_all"] = np.concatenate(max_certainties_all, axis=0)
+        mistakes_payload["certainty_max_tick_all"] = np.concatenate(max_certainty_tick_all, axis=0)
     else:
-        mistakes_payload["predictions_wrong"] = predictions_np[wrong_mask]
-        mistakes_payload["certainties_wrong"] = certainties_np[wrong_mask]
-        mistakes_payload["entropies_wrong"] = entropies_np[wrong_mask]
+        mistakes_payload["predictions_wrong"] = (
+            np.concatenate(predictions_wrong_batches, axis=0) if predictions_wrong_batches else np.empty((0,), dtype=np.float32)
+        )
+        mistakes_payload["certainties_wrong"] = (
+            np.concatenate(certainties_wrong_batches, axis=0) if certainties_wrong_batches else np.empty((0,), dtype=np.float32)
+        )
+        mistakes_payload["entropies_wrong"] = entropies_wrong_np
 
     np.savez(output_dir / "mistakes.npz", **mistakes_payload)
 
@@ -275,8 +308,8 @@ def main():
             )
 
     summary = {
-        "total_samples": int(predictions_np.shape[0]),
-        "num_wrong": n_wrong,
+        "total_samples": int(processed),
+        "num_wrong": int(total_wrong),
         "accuracy": accuracy,
         "dataset": "imagenet",
         "split": args.split,
@@ -306,7 +339,7 @@ def main():
                 f"final_certainty={cert_last:.4f} peak_certainty={cert_peak:.4f} peak_tick={int(tick_peak)}\n"
             )
 
-    print(f"Saved artefacts to {output_dir}. Accuracy={accuracy*100:.2f}% ({n_wrong} mistakes).")
+    print(f"Saved artefacts to {output_dir}. Accuracy={accuracy*100:.2f}% ({int(total_wrong)} mistakes).")
 
 
 if __name__ == "__main__":
