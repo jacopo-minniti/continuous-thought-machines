@@ -220,7 +220,12 @@ def main():
             certainty_max, certainty_tick = certainty_signal.max(dim=1)
 
             start_index = processed
-            batch_indices = torch.arange(start_index, start_index + batch_size)
+            batch_indices = torch.arange(
+                start_index,
+                start_index + batch_size,
+                device=targets.device,
+                dtype=torch.long,
+            )
 
             wrong_mask = preds_last != targets
             wrong_count = wrong_mask.sum().item()

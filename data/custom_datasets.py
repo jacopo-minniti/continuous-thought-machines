@@ -5,7 +5,18 @@ import random
 import numpy as np
 from tqdm.auto import tqdm
 from PIL import Image
-from datasets import load_dataset
+from datasets import load_dataset, __version__ as datasets_version
+
+
+def _datasets_version_tuple(version_str):
+    """Convert a semantic version string into a padded tuple for comparison."""
+    parts = []
+    for token in version_str.split("."):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
 
 class SortDataset(Dataset):
     def __init__(self, N):
@@ -125,7 +136,11 @@ class ImageNet(Dataset):
             operators (list): list of operators from which to sample
             action to take on observations (str): can be 'global' to compute operator over full observations, or 'select_K', where K=integer.
         """
-        dataset = load_dataset('ILSVRC/imagenet-1k', split=which_split, trust_remote_code=True)
+        version_tuple = _datasets_version_tuple(datasets_version)
+        if version_tuple < (3, 0, 0):
+            dataset = load_dataset('ILSVRC/imagenet-1k', split=which_split, trust_remote_code=True)
+        else:
+            dataset = load_dataset('ILSVRC/imagenet-1k', split=which_split)
 
         self.transform = transform
         self.base_dataset = dataset
