@@ -74,7 +74,7 @@ def parse_args():
     parser.add_argument('--inference_iterations', type=int, default=50, help="Iterations to use during inference.")
     parser.add_argument('--data_indices', type=int, nargs='+', default=[], help="Use specific indices in validation data for demos, otherwise random.")
     parser.add_argument('--N_to_viz', type=int, default=5, help="When not supplying data_indices.")
-    parser.add_argument('--attention_temperature', type=float, default=None, help="Temperature multiplier for attention logits (values >1 sharpen focus, <1 smooth). Defaults to checkpoint value.")
+    parser.add_argument('--attention_temperature', type=float, default=None, help="Initial attention temperature; per-sample entropy then linearly remaps it into [0.5, 1.5]. Defaults to the checkpoint value.")
     
     return parser.parse_args()
 
@@ -135,7 +135,7 @@ if __name__=='__main__':
     print(f" Loaded state_dict. Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}")
     model.eval() # Set model to evaluation mode
     model.attention_temperature = attn_temperature
-    print(f"Attention temperature set to {model.attention_temperature:.4f}")
+    print(f"Initial attention temperature set to {model.attention_temperature:.4f}")
 
     # --- Prepare Dataset ---
     if args.debug:

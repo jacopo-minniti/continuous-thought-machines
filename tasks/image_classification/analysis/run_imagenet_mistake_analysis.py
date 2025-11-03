@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         "--attention-temperature",
         type=float,
         default=None,
-        help="Temperature multiplier for attention logits (values >1 sharpen, <1 smooth). Defaults to checkpoint value.",
+        help="Initial attention temperature; per-sample entropy then linearly remaps it into [0.5, 1.5]. Defaults to the checkpoint value.",
     )
     return parser.parse_args()
 
@@ -178,7 +178,7 @@ def main():
     )
 
     model = instantiate_model(args.checkpoint, device, attention_temperature=args.attention_temperature)
-    print(f"Using attention temperature: {model.attention_temperature:.4f}")
+    print(f"Initial attention temperature: {model.attention_temperature:.4f}")
     if args.inference_iterations is not None:
         if model.iterations != args.inference_iterations:
             print(f"Overriding model iterations: {model.iterations} -> {args.inference_iterations}")
@@ -338,7 +338,7 @@ def main():
         "split": args.split,
         "checkpoint": args.checkpoint,
         "inference_iterations": int(model.iterations),
-        "attention_temperature": float(model.attention_temperature),
+        "initial_attention_temperature": float(model.attention_temperature),
         "class_labels": class_labels,
         "dataset_mean": dataset_mean,
         "dataset_std": dataset_std,
