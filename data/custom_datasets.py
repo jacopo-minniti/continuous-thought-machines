@@ -125,7 +125,7 @@ class ImageNet(Dataset):
             operators (list): list of operators from which to sample
             action to take on observations (str): can be 'global' to compute operator over full observations, or 'select_K', where K=integer.
         """
-        dataset = load_dataset('imagenet-1k', split=which_split, trust_remote_code=True)
+        dataset = load_dataset('ILSVRC/imagenet-1k', split=which_split, trust_remote_code=True)
 
         self.transform = transform
         self.base_dataset = dataset
