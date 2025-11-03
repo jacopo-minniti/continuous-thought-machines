@@ -182,6 +182,9 @@ if __name__=='__main__':
     model.eval()
 
     figscale = 0.85
+    base_dpi = 200
+    if args.actions and ('videos' in args.actions or 'demo' in args.actions):
+        base_dpi = 300
     topk = 5
     mean_certainties_correct, mean_certainties_incorrect = [],[]
     tracked_certainties = []
@@ -694,11 +697,12 @@ if __name__=='__main__':
                 # --- Finalize and Save Frame ---
                 fig.tight_layout(pad=0.1) # Adjust spacing
 
-                # Render the plot to a numpy array
+                fig.set_dpi(base_dpi)
                 canvas = fig.canvas
                 canvas.draw()
+                width, height = canvas.get_width_height()
                 image_numpy = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
-                image_numpy = image_numpy.reshape(*reversed(canvas.get_width_height()), 4)[:,:,:3] # Get RGB
+                image_numpy = image_numpy.reshape(height, width, 4)[:, :, :3]
 
                 frames.append(image_numpy) # Add to list for GIF
 
