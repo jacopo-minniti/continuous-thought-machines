@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('--actions', type=str, nargs='+', default=['videos'], choices=['plots', 'videos', 'demo'], help="Actions to take. Plots=results plots; videos=gifs/mp4s to watch attention; demo: last frame of internal ticks")
     parser.add_argument('--device', type=int, nargs='+', default=[-1], help="GPU device index or -1 for CPU")
     
-    parser.add_argument('--checkpoint', type=str, default='checkpoints/imagenet/ctm.pt', help="Path to ATM checkpoint")
+    parser.add_argument('--checkpoint', type=str, default='checkpoints/imagenet/ctm_clean.pt', help="Path to ATM checkpoint")
     parser.add_argument('--output_dir', type=str, default='tasks/image_classification/analysis/outputs/imagenet_viz', help="Directory for visualization outputs")
     parser.add_argument('--debug', action=argparse.BooleanOptionalAction, default=True, help='Debug mode: use CIFAR100 instead of ImageNet for debugging.')
     parser.add_argument('--plot_every', type=int, default=10, help="How often to plot.")
@@ -74,7 +74,6 @@ def parse_args():
     parser.add_argument('--inference_iterations', type=int, default=50, help="Iterations to use during inference.")
     parser.add_argument('--data_indices', type=int, nargs='+', default=[], help="Use specific indices in validation data for demos, otherwise random.")
     parser.add_argument('--N_to_viz', type=int, default=5, help="When not supplying data_indices.")
-    parser.add_argument('--attention_temperature', type=float, default=None, help="Initial attention temperature; per-sample entropy then linearly remaps it into [0.5, 1.5]. Defaults to the checkpoint value.")
     
     return parser.parse_args()
 
@@ -100,10 +99,6 @@ if __name__=='__main__':
         model_args.backbone_type = f'{model_args.resnet_type}-{getattr(model_args, "resnet_feature_scales", [4])[-1]}'
     if not hasattr(model_args, 'neuron_select_type'):
         model_args.neuron_select_type = 'first-last'
-    if not hasattr(model_args, 'attention_temperature'):
-        model_args.attention_temperature = 1.0
-
-    attn_temperature = args.attention_temperature if args.attention_temperature is not None else model_args.attention_temperature
 
 
     # Instantiate Model based on checkpoint args
@@ -127,15 +122,12 @@ if __name__=='__main__':
         dropout=0, # No dropout for eval
         neuron_select_type=model_args.neuron_select_type,
         n_random_pairing_self=model_args.n_random_pairing_self,
-        attention_temperature=attn_temperature,
     ).to(device)
 
     # Load weights into model
     load_result = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     print(f" Loaded state_dict. Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}")
     model.eval() # Set model to evaluation mode
-    model.attention_temperature = attn_temperature
-    print(f"Initial attention temperature set to {model.attention_temperature:.4f}")
 
     # --- Prepare Dataset ---
     if args.debug:
@@ -182,9 +174,6 @@ if __name__=='__main__':
     model.eval()
 
     figscale = 0.85
-    base_dpi = 200
-    if args.actions and ('videos' in args.actions or 'demo' in args.actions):
-        base_dpi = 300
     topk = 5
     mean_certainties_correct, mean_certainties_incorrect = [],[]
     tracked_certainties = []
@@ -697,12 +686,11 @@ if __name__=='__main__':
                 # --- Finalize and Save Frame ---
                 fig.tight_layout(pad=0.1) # Adjust spacing
 
-                fig.set_dpi(base_dpi)
+                # Render the plot to a numpy array
                 canvas = fig.canvas
                 canvas.draw()
-                width, height = canvas.get_width_height()
                 image_numpy = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
-                image_numpy = image_numpy.reshape(height, width, 4)[:, :, :3]
+                image_numpy = image_numpy.reshape(*reversed(canvas.get_width_height()), 4)[:,:,:3] # Get RGB
 
                 frames.append(image_numpy) # Add to list for GIF
 
