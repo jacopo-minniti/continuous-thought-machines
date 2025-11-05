@@ -76,8 +76,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                         NOTE: when using random-pairing, i-to-i (self) synchronisation is rare, meaning that 'recovering a
                         snapshot representation' (see paper) is difficult. This alleviates that. 
                         NOTE: works fine when set to 0.
-        attention_temperature (float): Initial temperature multiplier applied to the attention logits.
-                        NOTE: Acts as the first-step default before dynamic entropy-based scaling (values confined to [0.5, 1.5]).
     """                               
 
     def __init__(self,
@@ -100,7 +98,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  dropout_nlm=None,
                  neuron_select_type='random-pairing',  
                  n_random_pairing_self=0,
-                 attention_temperature=1.0,
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -117,7 +114,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.positional_embedding_type = positional_embedding_type
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
-        self.attention_temperature = float(attention_temperature)
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
 
         # --- Assertions ---
@@ -559,15 +555,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
         # Compute learned weighting for synchronisation
         
-        base_temperature = getattr(self, "attention_temperature", 1.0)
-        if base_temperature <= 0:
-            raise ValueError("attention_temperature must be positive.")
-        current_temperature = torch.full(
-            (B, 1, 1),
-            float(base_temperature),
-            device=device,
-            dtype=kv.dtype,
-        )
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
@@ -577,7 +564,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
             # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
-            q = q / current_temperature
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
             pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
@@ -610,12 +596,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 attention_tracking.append(attn_weights.detach().cpu().numpy())
                 synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
                 synch_action_tracking.append(synchronisation_action.detach().cpu().numpy())
-
-            if stepi < self.iterations - 1:
-                entropy = current_certainty[:, 0].clamp(0.0, 1.0)
-                # next_temperature = 1.5 + entropy  # maps [0,1] -> [1.5,2.5]
-                next_temperature = torch.ones_like(entropy)
-                current_temperature = next_temperature.view(B, 1, 1).detach()
 
         # --- Return Values ---
         if track:
