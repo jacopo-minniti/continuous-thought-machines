@@ -109,11 +109,13 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.prediction_reshaper = prediction_reshaper
         self.n_synch_out = n_synch_out
         self.n_synch_action = n_synch_action
+        self.heads = heads
         self.backbone_type = backbone_type
         self.out_dims = out_dims
         self.positional_embedding_type = positional_embedding_type
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
+        self.cache_size = 256
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
 
         # --- Assertions ---
@@ -146,6 +148,22 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if self.synch_representation_size_action:  # if not zero
             self.set_synchronisation_parameters('action', self.n_synch_action, n_random_pairing_self)
         self.set_synchronisation_parameters('out', self.n_synch_out, n_random_pairing_self)
+
+        self.register_buffer('initial_cache_state', torch.zeros(self.cache_size))
+        if self.heads:
+            if self.synch_representation_size_action == 0:
+                raise ValueError("n_synch_action must be > 0 to enable the gated perceptual cache.")
+            self.gate_proj = nn.Linear(self.synch_representation_size_action, self.d_input)
+            self.gate_proj.bias.data.zero_()
+            self.cache_mapper = nn.Linear(self.d_input, self.cache_size)
+            self.cache_layernorm = nn.LayerNorm(self.cache_size)
+            self.retention_proj = nn.Linear(self.synch_representation_size_action, self.cache_size)
+            self.retention_proj.bias.data.fill_(math.log(0.8 / 0.2))
+        else:
+            self.gate_proj = None
+            self.cache_mapper = None
+            self.cache_layernorm = None
+            self.retention_proj = None
 
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
@@ -509,6 +527,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if self.backbone_type=='none' and self.positional_embedding_type!='none':
             raise AssertionError("There should be no positional embedding if there is no backbone.")
 
+        if self.heads:
+            assert self.d_input % self.heads == 0, "d_input must be divisible by number of attention heads."
+            assert self.n_synch_action > 0, "n_synch_action must be > 0 when using attention heads."
+
     def calculate_synch_representation_size(self, n_synch):
         """
         Calculate the size of the synchronisation representation based on neuron selection type.
@@ -541,6 +563,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         # --- Initialise Recurrent State ---
         state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1) # Shape: (B, H, T)
         activated_state = self.start_activated_state.unsqueeze(0).expand(B, -1) # Shape: (B, H)
+        cache_state = self.initial_cache_state.unsqueeze(0).expand(B, -1).clone()
 
         # --- Prepare Storage for Outputs per Iteration ---
         predictions = torch.empty(B, self.out_dims, self.iterations, device=device, dtype=torch.float32)
@@ -562,11 +585,20 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
 
-            # --- Interact with Data via Attention ---
+            # --- Interact with Data via Attention and Update Cache ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+
+            if self.gate_proj is not None:
+                gates = torch.sigmoid(self.gate_proj(synchronisation_action))
+                gated_attn = gates * attn_out
+                cache_proposal = self.cache_layernorm(self.cache_mapper(gated_attn))
+                retention = torch.sigmoid(self.retention_proj(synchronisation_action))
+                cache_state = retention * cache_state + (1 - retention) * cache_proposal
+                pre_synapse_input = torch.concatenate((activated_state, cache_state), dim=-1)
+            else:
+                pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)

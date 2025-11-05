@@ -140,6 +140,7 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
         # --- Initialise Recurrent State ---
         state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1) # Shape: (B, H, T)
         activated_state = self.start_activated_state.unsqueeze(0).expand(B, -1) # Shape: (B, H)
+        cache_state = self.initial_cache_state.unsqueeze(0).expand(B, -1).clone()
 
         # --- Storage for outputs per iteration ---
         predictions = torch.empty(B, self.out_dims, total_iterations, device=device, dtype=x.dtype)
@@ -165,16 +166,25 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
 
             synchronization_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
 
-            # --- Interact with Data via Attention ---
+            # --- Interact with Data and Update Cache ---
             attn_weights = None
+            kv_flat = None
             if is_digit_step:
                 q = self.q_proj(synchronization_action).unsqueeze(1)
                 attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
                 attn_out = attn_out.squeeze(1)
-                pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+                glimpse = attn_out
             else:
-                kv = kv.squeeze(1)
-                pre_synapse_input = torch.concatenate((kv, activated_state), dim=-1)
+                kv_flat = kv if kv.dim() == 2 else kv.squeeze(1)
+                glimpse = kv_flat
+
+            gates = torch.sigmoid(self.gate_proj(synchronization_action))
+            gated_glimpse = gates * glimpse
+
+            cache_proposal = self.cache_layernorm(self.cache_mapper(gated_glimpse))
+            retention = torch.sigmoid(self.retention_proj(synchronization_action))
+            cache_state = retention * cache_state + (1 - retention) * cache_proposal
+            pre_synapse_input = torch.concatenate((activated_state, cache_state), dim=-1)
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -199,8 +209,8 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
                 post_activations_tracking.append(activated_state.detach().cpu().numpy())
                 if attn_weights is not None:
                     attention_tracking.append(attn_weights.detach().cpu().numpy())
-                if is_question_step:
-                    embedding_tracking.append(kv.detach().cpu().numpy())
+                if is_question_step and kv_flat is not None:
+                    embedding_tracking.append(kv_flat.detach().cpu().numpy())
 
         # --- Return Values ---
         if track:
