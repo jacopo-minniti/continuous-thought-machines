@@ -26,3 +26,4 @@ utils/hugging_face/
 .venv/
 test.py
 .cache/
+jobs/
