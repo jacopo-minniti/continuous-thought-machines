@@ -109,13 +109,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.prediction_reshaper = prediction_reshaper
         self.n_synch_out = n_synch_out
         self.n_synch_action = n_synch_action
-        self.heads = heads
         self.backbone_type = backbone_type
         self.out_dims = out_dims
         self.positional_embedding_type = positional_embedding_type
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
-        self.cache_size = 256
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
 
         # --- Assertions ---
@@ -128,6 +126,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.positional_embedding = self.get_positional_embedding(d_backbone)
         self.kv_proj = nn.Sequential(nn.LazyLinear(self.d_input), nn.LayerNorm(self.d_input)) if heads else None
         self.q_proj = nn.LazyLinear(self.d_input) if heads else None
+        self.reflect_head = nn.LazyLinear(1) if heads else None
+        self.hypothesis_projector = nn.LazyLinear(d_model) if heads else None
         self.attention = nn.MultiheadAttention(self.d_input, heads, dropout, batch_first=True) if heads else None
         
         # --- Core CTM Modules ---
@@ -149,26 +149,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             self.set_synchronisation_parameters('action', self.n_synch_action, n_random_pairing_self)
         self.set_synchronisation_parameters('out', self.n_synch_out, n_random_pairing_self)
 
-        self.register_buffer('initial_cache_state', torch.zeros(self.cache_size))
-        if self.heads:
-            if self.synch_representation_size_action == 0:
-                raise ValueError("n_synch_action must be > 0 to enable the gated perceptual cache.")
-            self.gate_proj = nn.Linear(self.synch_representation_size_action, self.d_input)
-            self.gate_proj.bias.data.zero_()
-            self.cache_mapper = nn.Linear(self.d_input, self.cache_size)
-            self.cache_layernorm = nn.LayerNorm(self.cache_size)
-            self.retention_proj = nn.Linear(self.synch_representation_size_action, self.cache_size)
-            self.retention_proj.bias.data.fill_(math.log(0.8 / 0.2))
-        else:
-            self.gate_proj = None
-            self.cache_mapper = None
-            self.cache_layernorm = None
-            self.retention_proj = None
-
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
-        self.reflect_projector = nn.LazyLinear(1) if self.synch_representation_size_out else None
-        self.hypothesis_projector = nn.LazyLinear(self.d_model) if heads else None
 
     @classmethod
     def _from_pretrained(
@@ -529,10 +511,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if self.backbone_type=='none' and self.positional_embedding_type!='none':
             raise AssertionError("There should be no positional embedding if there is no backbone.")
 
-        if self.heads:
-            assert self.d_input % self.heads == 0, "d_input must be divisible by number of attention heads."
-            assert self.n_synch_action > 0, "n_synch_action must be > 0 when using attention heads."
-
     def calculate_synch_representation_size(self, n_synch):
         """
         Calculate the size of the synchronisation representation based on neuron selection type.
@@ -565,7 +543,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         # --- Initialise Recurrent State ---
         state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1) # Shape: (B, H, T)
         activated_state = self.start_activated_state.unsqueeze(0).expand(B, -1) # Shape: (B, H)
-        cache_state = self.initial_cache_state.unsqueeze(0).expand(B, -1).clone()
 
         # --- Prepare Storage for Outputs per Iteration ---
         predictions = torch.empty(B, self.out_dims, self.iterations, device=device, dtype=torch.float32)
@@ -577,30 +554,26 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.decay_params_out.data = torch.clamp(self.decay_params_out, 0, 15)
         r_action, r_out = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1), torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
-        decay_alpha_out, decay_beta_out = None, None
-        synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
-            activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out'
-        )
-        if self.reflect_projector is not None:
-            reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
-        else:
-            reflect_gate = torch.ones(B, 1, device=device, dtype=activated_state.dtype)
+        _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
+        # Compute learned weighting for synchronisation
+        
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
+            retention = torch.sigmoid(self.reflect_head(synchronisation_action)) if self.reflect_head else None
 
-            # --- Interact with Data via Attention and Update Cache ---
+            # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            if self.hypothesis_projector is not None:
-                evidence_hypothesis = self.hypothesis_projector(attn_out)
+            evidence_hypothesis = self.hypothesis_projector(attn_out) if self.hypothesis_projector else attn_out
+            if retention is None:
+                pre_synapse_input = activated_state
             else:
-                evidence_hypothesis = activated_state
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+                pre_synapse_input = retention * activated_state + (1 - retention) * evidence_hypothesis
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -608,16 +581,13 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
 
             # --- Apply Neuron-Level Models ---
-            new_post_activation = self.trace_processor(state_trace)
+            activated_state = self.trace_processor(state_trace)
             # One would also keep an 'activated_state_trace' as the history of outgoing post-activations
             # BUT, this is unnecessary because the synchronisation calculation is fully linear and can be
             # done using only the currect activated state (see compute_synchronisation method for explanation)
 
             # --- Calculate Synchronisation for Output Predictions ---
-            activated_state = reflect_gate * new_post_activation + (1 - reflect_gate) * evidence_hypothesis
-            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
-                activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out'
-            )
+            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
@@ -625,11 +595,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
             predictions[..., stepi] = current_prediction
             certainties[..., stepi] = current_certainty
-
-            if self.reflect_projector is not None:
-                reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
-            else:
-                reflect_gate = torch.ones_like(reflect_gate)
 
             # --- Tracking ---
             if track:
