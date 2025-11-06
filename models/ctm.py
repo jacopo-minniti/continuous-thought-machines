@@ -554,12 +554,14 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.decay_params_out.data = torch.clamp(self.decay_params_out, 0, 15)
         r_action, r_out = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1), torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
-        _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
+        synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
         # Compute learned weighting for synchronisation
         
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
+
+            reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
@@ -569,7 +571,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
             evidence_hypothesis = self.hypothesis_projector(attn_out)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            pre_synapse_input = reflect_gate * activated_state + (1 - reflect_gate) * evidence_hypothesis
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -588,8 +590,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
             current_certainty = self.compute_certainty(current_prediction)
-            reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
-            activated_state = reflect_gate * new_post_activation + (1 - reflect_gate) * evidence_hypothesis
+            activated_state = new_post_activation
 
             predictions[..., stepi] = current_prediction
             certainties[..., stepi] = current_certainty
