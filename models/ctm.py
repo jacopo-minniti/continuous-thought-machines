@@ -167,8 +167,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
-        self.reflect_projector = nn.LazyLinear(1)
-        self.hypothesis_projector = nn.LazyLinear(self.d_model)
+        self.reflect_projector = nn.LazyLinear(1) if self.synch_representation_size_out else None
+        self.hypothesis_projector = nn.LazyLinear(self.d_model) if heads else None
 
     @classmethod
     def _from_pretrained(
@@ -578,9 +578,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         r_action, r_out = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1), torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
         decay_alpha_out, decay_beta_out = None, None
+        synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
+            activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out'
+        )
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
+
+            if self.reflect_projector is not None:
+                reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
+            else:
+                reflect_gate = torch.ones(B, 1, device=device, dtype=activated_state.dtype)
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
@@ -589,8 +597,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            evidence_hypothesis = self.hypothesis_projector(attn_out)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            if self.hypothesis_projector is not None:
+                evidence_hypothesis = self.hypothesis_projector(attn_out)
+            else:
+                evidence_hypothesis = activated_state
+            pre_synapse_input = activated_state
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -604,11 +615,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # done using only the currect activated state (see compute_synchronisation method for explanation)
 
             # --- Calculate Synchronisation for Output Predictions ---
-            prev_decay_alpha_out, prev_decay_beta_out = decay_alpha_out, decay_beta_out
-            candidate_synchronisation, _, _ = self.compute_synchronisation(new_post_activation, prev_decay_alpha_out, prev_decay_beta_out, r_out, synch_type='out')
-            reflect_gate = torch.sigmoid(self.reflect_projector(candidate_synchronisation))
             activated_state = reflect_gate * new_post_activation + (1 - reflect_gate) * evidence_hypothesis
-            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, prev_decay_alpha_out, prev_decay_beta_out, r_out, synch_type='out')
+            prev_decay_alpha_out, prev_decay_beta_out = decay_alpha_out, decay_beta_out
+            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(
+                activated_state, prev_decay_alpha_out, prev_decay_beta_out, r_out, synch_type='out'
+            )
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
