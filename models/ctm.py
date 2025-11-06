@@ -577,14 +577,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.decay_params_out.data = torch.clamp(self.decay_params_out, 0, 15)
         r_action, r_out = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1), torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
-        synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
-        # Compute learned weighting for synchronisation
-        
+        decay_alpha_out, decay_beta_out = None, None
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
-
-            reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
@@ -594,7 +590,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
             evidence_hypothesis = self.hypothesis_projector(attn_out)
-            pre_synapse_input = reflect_gate * activated_state + (1 - reflect_gate) * evidence_hypothesis
+            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -608,12 +604,15 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # done using only the currect activated state (see compute_synchronisation method for explanation)
 
             # --- Calculate Synchronisation for Output Predictions ---
-            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(new_post_activation, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
+            prev_decay_alpha_out, prev_decay_beta_out = decay_alpha_out, decay_beta_out
+            candidate_synchronisation, _, _ = self.compute_synchronisation(new_post_activation, prev_decay_alpha_out, prev_decay_beta_out, r_out, synch_type='out')
+            reflect_gate = torch.sigmoid(self.reflect_projector(candidate_synchronisation))
+            activated_state = reflect_gate * new_post_activation + (1 - reflect_gate) * evidence_hypothesis
+            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, prev_decay_alpha_out, prev_decay_beta_out, r_out, synch_type='out')
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
             current_certainty = self.compute_certainty(current_prediction)
-            activated_state = new_post_activation
 
             predictions[..., stepi] = current_prediction
             certainties[..., stepi] = current_certainty
