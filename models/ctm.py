@@ -126,6 +126,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.positional_embedding = self.get_positional_embedding(d_backbone)
         self.kv_proj = nn.Sequential(nn.LazyLinear(self.d_input), nn.LayerNorm(self.d_input)) if heads else None
         self.q_proj = nn.LazyLinear(self.d_input) if heads else None
+        self.reflect_head = nn.LazyLinear(1) if heads else None
+        self.hypothesis_projector = nn.LazyLinear(d_model) if heads else None
         self.attention = nn.MultiheadAttention(self.d_input, heads, dropout, batch_first=True) if heads else None
         
         # --- Core CTM Modules ---
@@ -561,12 +563,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
+            retention = torch.sigmoid(self.reflect_head(synchronisation_action)) if self.reflect_head else None
 
             # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            evidence_hypothesis = self.hypothesis_projector(attn_out) if self.hypothesis_projector else attn_out
+            if retention is None:
+                pre_synapse_input = activated_state
+            else:
+                pre_synapse_input = retention * activated_state + (1 - retention) * evidence_hypothesis
 
             # --- Apply Synapses ---
             state = self.synapses(pre_synapse_input)
@@ -601,4 +608,3 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if track:
             return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
         return predictions, certainties, synchronisation_out
-
