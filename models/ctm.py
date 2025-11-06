@@ -149,6 +149,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
+        self.reflect_projector = nn.LazyLinear(1)
+        self.hypothesis_projector = nn.LazyLinear(self.d_model)
 
     @classmethod
     def _from_pretrained(
@@ -566,6 +568,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
+            evidence_hypothesis = self.hypothesis_projector(attn_out)
             pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
 
             # --- Apply Synapses ---
@@ -574,17 +577,19 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
 
             # --- Apply Neuron-Level Models ---
-            activated_state = self.trace_processor(state_trace)
+            new_post_activation = self.trace_processor(state_trace)
             # One would also keep an 'activated_state_trace' as the history of outgoing post-activations
             # BUT, this is unnecessary because the synchronisation calculation is fully linear and can be
             # done using only the currect activated state (see compute_synchronisation method for explanation)
 
             # --- Calculate Synchronisation for Output Predictions ---
-            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
+            synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(new_post_activation, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
             current_certainty = self.compute_certainty(current_prediction)
+            reflect_gate = torch.sigmoid(self.reflect_projector(synchronisation_out))
+            activated_state = reflect_gate * new_post_activation + (1 - reflect_gate) * evidence_hypothesis
 
             predictions[..., stepi] = current_prediction
             certainties[..., stepi] = current_certainty
@@ -601,4 +606,3 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if track:
             return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
         return predictions, certainties, synchronisation_out
-
