@@ -93,20 +93,10 @@ def main():
         images = images.to(device)
         labels = labels.to(device)
 
-        retention_cache = []
-
-        def hook_fn(_, __, out):
-            retention_cache.append(torch.sigmoid(out.detach()).cpu())
-
-        handle = model.reflect_head.register_forward_hook(hook_fn)
         with torch.no_grad():
-            predictions, certainties, _ = model(images)
-        handle.remove()
+            predictions, certainties, _, retention = model(images, return_retention=True)
 
-        if not retention_cache:
-            raise RuntimeError('Retention hook did not capture any values.')
-
-        retention_tensor = torch.stack(retention_cache).squeeze(-1)  # (iterations, batch)
+        retention_tensor = retention.detach().cpu().transpose(0, 1)  # (iterations, batch)
         where_most_certain = certainties[:, 1].argmax(-1)
         batch_indexer = torch.arange(predictions.size(0), device=predictions.device)
         chosen_logits = predictions[batch_indexer, :, where_most_certain]
