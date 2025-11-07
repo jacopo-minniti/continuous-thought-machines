@@ -472,8 +472,8 @@ if __name__=='__main__':
                  torch.compiler.cudagraph_mark_step_begin()
 
             if args.model == 'ctm':
-                predictions, certainties, synchronisation = model(inputs)
-                loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                predictions, certainties, synchronisation, retention = model(inputs, return_retention=True)
+                loss, where_most_certain = image_classification_loss(predictions, certainties, targets, retention=retention, use_most_certain=True)
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
                 loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
@@ -546,8 +546,8 @@ if __name__=='__main__':
 
                         loss_eval = None
                         if args.model == 'ctm':
-                            predictions, certainties, _ = model(inputs)
-                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                            predictions, certainties, _, retention = model(inputs, return_retention=True)
+                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, retention=retention, use_most_certain=True)
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_train_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'lstm':
@@ -600,8 +600,8 @@ if __name__=='__main__':
 
                         loss_eval = None
                         if args.model == 'ctm':
-                            predictions, certainties, _ = model(inputs)
-                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                            predictions, certainties, _, retention = model(inputs, return_retention=True)
+                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, retention=retention, use_most_certain=True)
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_test_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'lstm':

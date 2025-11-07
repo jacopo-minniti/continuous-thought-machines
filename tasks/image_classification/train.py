@@ -405,8 +405,8 @@ if __name__=='__main__':
                      torch.compiler.cudagraph_mark_step_begin()
 
                 if args.model == 'ctm':
-                    predictions, certainties, synchronisation = model(inputs)
-                    loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                    predictions, certainties, synchronisation, retention = model(inputs, return_retention=True)
+                    loss, where_most_certain = image_classification_loss(predictions, certainties, targets, retention=retention, use_most_certain=True)
                     accuracy = (predictions.argmax(1)[torch.arange(predictions.size(0), device=predictions.device),where_most_certain] == targets).float().mean().item()
                     pbar_desc = f'CTM Loss={loss.item():0.3f}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})'
 
@@ -472,8 +472,8 @@ if __name__=='__main__':
 
                             # Model-specific forward and loss for evaluation
                             if args.model == 'ctm':
-                                these_predictions, certainties, _ = model(inputs)
-                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, use_most_certain=True)
+                                these_predictions, certainties, _, retention = model(inputs, return_retention=True)
+                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, retention=retention, use_most_certain=True)
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy()) # Shape (B, T)
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy()) # Shape (B,)
 
@@ -531,8 +531,8 @@ if __name__=='__main__':
 
                             # Model-specific forward and loss for evaluation
                             if args.model == 'ctm':
-                                these_predictions, certainties, _ = model(inputs)
-                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, use_most_certain=True)
+                                these_predictions, certainties, _, retention = model(inputs, return_retention=True)
+                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, retention=retention, use_most_certain=True)
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy())
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy())
 

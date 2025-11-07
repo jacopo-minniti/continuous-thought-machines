@@ -55,7 +55,7 @@ def sort_loss(predictions, targets):
     loss = compute_ctc_loss(predictions, targets, blank_label=predictions.shape[1]-1)
     return loss
 
-def image_classification_loss(predictions, certainties, targets, use_most_certain=True):
+def image_classification_loss(predictions, certainties, targets, retention=None, use_most_certain=True):
     """
     Computes the maze loss with auto-extending cirriculum.
 
@@ -79,7 +79,19 @@ def image_classification_loss(predictions, certainties, targets, use_most_certai
     loss_minimum_ce = losses[batch_indexer, loss_index_1].mean()
     loss_selected = losses[batch_indexer, loss_index_2].mean()
 
-    loss = (loss_minimum_ce + loss_selected)/2
+    loss_terms = [loss_minimum_ce, loss_selected]
+
+    if retention is not None:
+        if retention.ndim == 3 and retention.size(1) == 1:
+            retention = retention.squeeze(1)
+        assert retention.shape[-1] == losses.size(-1), "Retention length must match number of internal ticks."
+        r_high_idx = retention.argmax(dim=-1)
+        r_low_idx = retention.argmin(dim=-1)
+        loss_high = losses[batch_indexer, r_high_idx].mean()
+        loss_low = losses[batch_indexer, r_low_idx].mean()
+        loss_terms.extend([loss_high, loss_low])
+
+    loss = torch.stack(loss_terms).mean()
     return loss, loss_index_2
 
 def maze_loss(predictions, certainties, targets, cirriculum_lookahead=5, use_most_certain=True):

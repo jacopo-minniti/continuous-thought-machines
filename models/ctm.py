@@ -526,9 +526,12 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
 
 
-    def forward(self, x, track=False):
+    def forward(self, x, track=False, return_retention=False):
         B = x.size(0)
         device = x.device
+
+        if return_retention and self.reflect_head is None:
+            raise RuntimeError("return_retention=True but reflect head is unavailable (heads=0).")
 
         # --- Tracking Initialization ---
         pre_activations_tracking = []
@@ -558,12 +561,16 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         # Compute learned weighting for synchronisation
         
 
+        retention_history = [] if return_retention else None
+
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
 
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
             retention = torch.sigmoid(self.reflect_head(synchronisation_action)) if self.reflect_head else None
+            if retention_history is not None and retention is not None:
+                retention_history.append(retention.squeeze(-1) if retention.dim() > 1 else retention)
 
             # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
@@ -604,7 +611,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
                 synch_action_tracking.append(synchronisation_action.detach().cpu().numpy())
 
+        retention_tensor = None
+        if retention_history:
+            retention_tensor = torch.stack(retention_history, dim=-1)
+
         # --- Return Values ---
         if track:
-            return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
+            track_tuple = (predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)),
+                           np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking))
+            if return_retention:
+                return track_tuple + (retention_tensor,)
+            return track_tuple
+        if return_retention:
+            return predictions, certainties, synchronisation_out, retention_tensor
         return predictions, certainties, synchronisation_out
