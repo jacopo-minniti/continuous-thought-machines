@@ -1,4 +1,6 @@
 import argparse
+import math
+
 import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import DataLoader
@@ -17,7 +19,7 @@ def parse_args():
     parser.add_argument('--max_batches', type=int, default=20, help='Number of test batches to evaluate (set <=0 for full test set).')
     parser.add_argument('--device', default='cuda:0', type=str, help='Device string, e.g. "cuda:0", "cpu", or "mps".')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers.')
-    parser.add_argument('--seed', type=int, default=1, help='PRNG seed for dataloader shuffling.')
+    parser.add_argument('--seed', type=int, default=0, help='PRNG seed for dataloader shuffling.')
     parser.add_argument('--output', default='retention_plot.png', type=str, help='File path used to save the plot. Use "-" to display instead.')
     return parser.parse_args()
 
@@ -47,7 +49,7 @@ def instantiate_model(saved_args, out_dims, device):
     return model
 
 
-def gather_mean_retention(args):
+def gather_retention_stats(args):
     set_seed(args.seed, deterministic=False)
     assert args.dataset == 'cifar10', 'This helper currently targets CIFAR10 configs.'
 
@@ -77,7 +79,8 @@ def gather_mean_retention(args):
         raise RuntimeError('Model does not have a reflect head (heads=0). Cannot log retention.')
 
     mean_tracker = torch.zeros(model.iterations)
-    batches_ran = 0
+    sumsq_tracker = torch.zeros_like(mean_tracker)
+    sample_count = 0
 
     for batch_idx, (images, _) in enumerate(testloader):
         if 0 < args.max_batches <= batch_idx:
@@ -88,23 +91,32 @@ def gather_mean_retention(args):
             _, _, _, retention = model(images, return_retention=True)
 
         retention_tensor = retention.detach().cpu().transpose(0, 1)  # (iterations, batch)
-        mean_tracker += retention_tensor.mean(dim=1)
-        batches_ran += 1
+        mean_tracker += retention_tensor.sum(dim=1)
+        sumsq_tracker += (retention_tensor ** 2).sum(dim=1)
+        sample_count += retention_tensor.size(1)
 
-    if batches_ran == 0:
+    if sample_count == 0:
         raise RuntimeError('No batches were evaluated. Check max_batches setting.')
 
-    mean_tracker /= batches_ran
-    return mean_tracker
+    mean_tracker /= sample_count
+    variance = (sumsq_tracker / sample_count) - mean_tracker.pow(2)
+    variance.clamp_(min=0.0)
+    stderr = torch.sqrt(variance) / math.sqrt(sample_count)
+    ci_tracker = 1.96 * stderr
+    return mean_tracker, ci_tracker
 
 
-def plot_retention(mean_tracker, output_path):
+def plot_retention(mean_tracker, ci_tracker, output_path):
     max_tick = min(50, mean_tracker.numel() - 1)
     ticks = list(range(max_tick + 1))
     values = mean_tracker[:max_tick + 1].numpy()
+    cis = ci_tracker[:max_tick + 1].numpy()
+    lower = values - cis
+    upper = values + cis
 
     plt.figure(figsize=(8, 4.5))
-    plt.plot(ticks, values, marker='o')
+    plt.plot(ticks, values, linewidth=2)
+    plt.fill_between(ticks, lower, upper, alpha=0.2, label='95% CI')
     plt.xlabel('Tick')
     plt.ylabel('Mean retention score')
     plt.title('Mean retention vs tick (0-50)')
@@ -122,8 +134,8 @@ def plot_retention(mean_tracker, output_path):
 
 def main():
     args = parse_args()
-    mean_tracker = gather_mean_retention(args)
-    plot_retention(mean_tracker.cpu(), args.output)
+    mean_tracker, ci_tracker = gather_retention_stats(args)
+    plot_retention(mean_tracker.cpu(), ci_tracker.cpu(), args.output)
 
 
 if __name__ == '__main__':
