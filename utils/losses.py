@@ -64,7 +64,12 @@ def image_classification_loss(predictions, certainties, targets, retention=None,
         where the inside dimension (2) is [normalised_entropy, 1-normalised_entropy]
     Targets are of shape: [B]
 
-    use_most_certain will select either the most certain point or the final point. 
+    use_most_certain will select either the most certain point or the final point.
+
+    Returns:
+        loss: scalar tensor used for backprop.
+        loss_index_2: tick indices chosen by certainty.
+        components: dict with 'primary_loss', 'aux_raw', and 'aux_weighted' (detached tensors).
     """
     targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), predictions.size(-1), -1)
     # Losses are of shape [B, internal_ticks]
@@ -80,7 +85,10 @@ def image_classification_loss(predictions, certainties, targets, retention=None,
     loss_selected = losses[batch_indexer, loss_index_2].mean()
 
     loss_terms = [loss_minimum_ce, loss_selected]
-    loss = torch.stack(loss_terms).mean()
+    primary_loss = torch.stack(loss_terms).mean()
+
+    aux_raw = torch.zeros(1, device=predictions.device, dtype=primary_loss.dtype)
+    loss = primary_loss
 
     if retention is not None and retention_gamma > 0.0 and losses.size(-1) > 1:
         if retention.ndim == 3 and retention.size(1) == 1:
@@ -92,10 +100,16 @@ def image_classification_loss(predictions, certainties, targets, retention=None,
         transition_ticks = torch.arange(1, max_tick, device=losses.device).unsqueeze(0)
         cutoff_mask = transition_ticks <= loss_index_1.unsqueeze(-1)
         masked_product = (loss_deltas * retention_deltas) * cutoff_mask
-        aux = -masked_product.sum(dim=-1).mean()
-        loss = loss + retention_gamma * aux
+        aux_raw = -masked_product.sum(dim=-1).mean()
+        loss = loss + retention_gamma * aux_raw
 
-    return loss, loss_index_2
+    components = {
+        'primary_loss': primary_loss.detach(),
+        'aux_raw': aux_raw.detach(),
+        'aux_weighted': (retention_gamma * aux_raw).detach(),
+    }
+
+    return loss, loss_index_2, components
 
 def maze_loss(predictions, certainties, targets, cirriculum_lookahead=5, use_most_certain=True):
     """

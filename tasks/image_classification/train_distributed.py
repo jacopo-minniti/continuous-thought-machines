@@ -475,7 +475,7 @@ if __name__=='__main__':
 
             if args.model == 'ctm':
                 predictions, certainties, synchronisation, retention = model(inputs, return_retention=True)
-                loss, where_most_certain = image_classification_loss(
+                loss, where_most_certain, loss_components = image_classification_loss(
                     predictions,
                     certainties,
                     targets,
@@ -485,7 +485,7 @@ if __name__=='__main__':
                 )
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
-                loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                loss, where_most_certain, _ = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
             elif args.model == 'ff':
                 predictions = model(inputs) # FF returns only predictions
                 loss = nn.CrossEntropyLoss()(predictions, targets)
@@ -519,6 +519,11 @@ if __name__=='__main__':
                 accuracy_local = (predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain] == targets).float().mean().item()
                 where_certain_tensor = where_most_certain.float() # Use rank 0's tensor for stats
                 pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f} WhereCert(loc)={where_certain_tensor.mean().item():.2f}'
+                if args.model == 'ctm':
+                    ce_val = loss_components['primary_loss'].item()
+                    aux_raw = loss_components['aux_raw'].item()
+                    aux_weighted = loss_components['aux_weighted'].item()
+                    pbar_desc += f' CE={ce_val:0.3f} Aux={aux_raw:0.4f} wAux={aux_weighted:0.4f}'
              elif args.model == 'ff':
                 accuracy_local = (predictions.argmax(1) == targets).float().mean().item()
                 pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f}'
@@ -556,7 +561,7 @@ if __name__=='__main__':
                         loss_eval = None
                         if args.model == 'ctm':
                             predictions, certainties, _, retention = model(inputs, return_retention=True)
-                            loss_eval, where_most_certain = image_classification_loss(
+                            loss_eval, where_most_certain, _ = image_classification_loss(
                                 predictions,
                                 certainties,
                                 targets,
@@ -568,7 +573,7 @@ if __name__=='__main__':
                             total_train_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'lstm':
                             predictions, certainties, _ = model(inputs)
-                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                            loss_eval, where_most_certain, _ = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_train_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'ff':
@@ -617,7 +622,7 @@ if __name__=='__main__':
                         loss_eval = None
                         if args.model == 'ctm':
                             predictions, certainties, _, retention = model(inputs, return_retention=True)
-                            loss_eval, where_most_certain = image_classification_loss(
+                            loss_eval, where_most_certain, _ = image_classification_loss(
                                 predictions,
                                 certainties,
                                 targets,
@@ -629,7 +634,7 @@ if __name__=='__main__':
                             total_test_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'lstm':
                             predictions, certainties, _ = model(inputs)
-                            loss_eval, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                            loss_eval, where_most_certain, _ = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_test_correct_certain += (preds_eval == targets).sum()
                         elif args.model == 'ff':
