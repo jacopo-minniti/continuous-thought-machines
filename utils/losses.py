@@ -86,9 +86,13 @@ def image_classification_loss(predictions, certainties, targets, retention=None,
         if retention.ndim == 3 and retention.size(1) == 1:
             retention = retention.squeeze(1)
         assert retention.shape[-1] == losses.size(-1), "Retention length must match number of internal ticks."
+        max_tick = losses.size(-1)
         loss_deltas = losses[:, :-1] - losses[:, 1:]
         retention_deltas = retention[:, 1:] - retention[:, :-1]
-        aux = -(loss_deltas * retention_deltas).sum(dim=-1).mean()
+        transition_ticks = torch.arange(1, max_tick, device=losses.device).unsqueeze(0)
+        cutoff_mask = transition_ticks <= loss_index_1.unsqueeze(-1)
+        masked_product = (loss_deltas * retention_deltas) * cutoff_mask
+        aux = -masked_product.sum(dim=-1).mean()
         loss = loss + retention_gamma * aux
 
     return loss, loss_index_2
