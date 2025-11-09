@@ -1,7 +1,6 @@
 import argparse
-import math
-
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -80,7 +79,7 @@ def gather_retention_stats(args):
 
     mean_tracker = torch.zeros(model.iterations)
     sumsq_tracker = torch.zeros_like(mean_tracker)
-    sample_count = 0
+    per_tick_counts = torch.zeros_like(mean_tracker)
 
     for batch_idx, (images, _) in enumerate(testloader):
         if 0 < args.max_batches <= batch_idx:
@@ -93,30 +92,29 @@ def gather_retention_stats(args):
         retention_tensor = retention.detach().cpu().transpose(0, 1)  # (iterations, batch)
         mean_tracker += retention_tensor.sum(dim=1)
         sumsq_tracker += (retention_tensor ** 2).sum(dim=1)
-        sample_count += retention_tensor.size(1)
+        per_tick_counts += retention_tensor.size(1)
 
-    if sample_count == 0:
+    if per_tick_counts.sum() == 0:
         raise RuntimeError('No batches were evaluated. Check max_batches setting.')
 
-    mean_tracker /= sample_count
-    variance = (sumsq_tracker / sample_count) - mean_tracker.pow(2)
+    mean_tracker /= per_tick_counts
+    variance = (sumsq_tracker / per_tick_counts) - mean_tracker.pow(2)
     variance.clamp_(min=0.0)
-    stderr = torch.sqrt(variance) / math.sqrt(sample_count)
-    ci_tracker = 1.96 * stderr
-    return mean_tracker, ci_tracker
+    std_tracker = torch.sqrt(variance)
+    return mean_tracker, std_tracker
 
 
-def plot_retention(mean_tracker, ci_tracker, output_path):
+def plot_retention(mean_tracker, spread_tracker, output_path):
     max_tick = min(50, mean_tracker.numel() - 1)
     ticks = list(range(max_tick + 1))
     values = mean_tracker[:max_tick + 1].numpy()
-    cis = ci_tracker[:max_tick + 1].numpy()
-    lower = values - cis
-    upper = values + cis
+    spread = spread_tracker[:max_tick + 1].numpy()
+    lower = np.clip(values - spread, 0.0, 1.0)
+    upper = np.clip(values + spread, 0.0, 1.0)
 
     plt.figure(figsize=(8, 4.5))
     plt.plot(ticks, values, linewidth=2)
-    plt.fill_between(ticks, lower, upper, alpha=0.2, label='95% CI')
+    plt.fill_between(ticks, lower, upper, alpha=0.2, label='Std dev band')
     plt.xlabel('Tick')
     plt.ylabel('Mean retention score')
     plt.title('Mean retention vs tick (0-50)')
@@ -134,8 +132,8 @@ def plot_retention(mean_tracker, ci_tracker, output_path):
 
 def main():
     args = parse_args()
-    mean_tracker, ci_tracker = gather_retention_stats(args)
-    plot_retention(mean_tracker.cpu(), ci_tracker.cpu(), args.output)
+    mean_tracker, std_tracker = gather_retention_stats(args)
+    plot_retention(mean_tracker.cpu(), std_tracker.cpu(), args.output)
 
 
 if __name__ == '__main__':
