@@ -115,9 +115,8 @@ def parse_args():
     parser.add_argument('--data_root', type=str, default='data/', help='Where to save dataset.')
     parser.add_argument('--save_every', type=int, default=1000, help='Save checkpoints every this many iterations.')
     parser.add_argument('--seed', type=int, default=412, help='Random seed.')
-    parser.add_argument('--retention_loss_terms', type=str, default='both',
-                        choices=['lowest', 'highest', 'both'],
-                        help='Which retention-indexed CE terms to include when retention is available.')
+    parser.add_argument('--retention_gamma', type=float, default=0.05,
+                        help='Weight for the retention Δ-loss auxiliary term.')
     parser.add_argument('--reload', action=argparse.BooleanOptionalAction, default=False, help='Reload from disk?')
     parser.add_argument('--reload_model_only', action=argparse.BooleanOptionalAction, default=False, help='Reload only the model from disk?')
     parser.add_argument('--strict_reload', action=argparse.BooleanOptionalAction, default=True, help='Should use strict reload for model weights.') 
@@ -482,7 +481,7 @@ if __name__=='__main__':
                     targets,
                     retention=retention,
                     use_most_certain=True,
-                    retention_terms=args.retention_loss_terms,
+                    retention_gamma=args.retention_gamma,
                 )
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
@@ -563,7 +562,7 @@ if __name__=='__main__':
                                 targets,
                                 retention=retention,
                                 use_most_certain=True,
-                                retention_terms=args.retention_loss_terms,
+                                retention_gamma=args.retention_gamma,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_train_correct_certain += (preds_eval == targets).sum()
@@ -624,7 +623,7 @@ if __name__=='__main__':
                                 targets,
                                 retention=retention,
                                 use_most_certain=True,
-                                retention_terms=args.retention_loss_terms,
+                                retention_gamma=args.retention_gamma,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_test_correct_certain += (preds_eval == targets).sum()

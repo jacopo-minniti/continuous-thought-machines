@@ -111,9 +111,8 @@ def parse_args():
     parser.add_argument('--data_root', type=str, default='data/', help='Where to save dataset.')
     parser.add_argument('--save_every', type=int, default=1000, help='Save checkpoints every this many iterations.')
     parser.add_argument('--seed', type=int, default=412, help='Random seed.')
-    parser.add_argument('--retention_loss_terms', type=str, default='both',
-                        choices=['lowest', 'highest', 'both'],
-                        help='Which retention-indexed CE terms to include when retention is available.')
+    parser.add_argument('--retention_gamma', type=float, default=0.05,
+                        help='Weight for the retention Δ-loss auxiliary term.')
     parser.add_argument('--reload', action=argparse.BooleanOptionalAction, default=False, help='Reload from disk?')
     parser.add_argument('--reload_model_only', action=argparse.BooleanOptionalAction, default=False, help='Reload only the model from disk?')
     parser.add_argument('--strict_reload', action=argparse.BooleanOptionalAction, default=True, help='Should use strict reload for model weights.') # Added back
@@ -415,7 +414,7 @@ if __name__=='__main__':
                         targets,
                         retention=retention,
                         use_most_certain=True,
-                        retention_terms=args.retention_loss_terms,
+                        retention_gamma=args.retention_gamma,
                     )
                     accuracy = (predictions.argmax(1)[torch.arange(predictions.size(0), device=predictions.device),where_most_certain] == targets).float().mean().item()
                     pbar_desc = f'CTM Loss={loss.item():0.3f}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})'
@@ -489,7 +488,7 @@ if __name__=='__main__':
                                     targets,
                                     retention=retention,
                                     use_most_certain=True,
-                                    retention_terms=args.retention_loss_terms,
+                                    retention_gamma=args.retention_gamma,
                                 )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy()) # Shape (B, T)
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy()) # Shape (B,)
@@ -555,7 +554,7 @@ if __name__=='__main__':
                                     targets,
                                     retention=retention,
                                     use_most_certain=True,
-                                    retention_terms=args.retention_loss_terms,
+                                    retention_gamma=args.retention_gamma,
                                 )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy())
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy())

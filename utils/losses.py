@@ -55,7 +55,7 @@ def sort_loss(predictions, targets):
     loss = compute_ctc_loss(predictions, targets, blank_label=predictions.shape[1]-1)
     return loss
 
-def image_classification_loss(predictions, certainties, targets, retention=None, use_most_certain=True, retention_terms='both'):
+def image_classification_loss(predictions, certainties, targets, retention=None, use_most_certain=True, retention_gamma=0.0):
     """
     Computes the maze loss with auto-extending cirriculum.
 
@@ -80,21 +80,17 @@ def image_classification_loss(predictions, certainties, targets, retention=None,
     loss_selected = losses[batch_indexer, loss_index_2].mean()
 
     loss_terms = [loss_minimum_ce, loss_selected]
+    loss = torch.stack(loss_terms).mean()
 
-    if retention is not None:
+    if retention is not None and retention_gamma > 0.0 and losses.size(-1) > 1:
         if retention.ndim == 3 and retention.size(1) == 1:
             retention = retention.squeeze(1)
         assert retention.shape[-1] == losses.size(-1), "Retention length must match number of internal ticks."
-        r_high_idx = retention.argmax(dim=-1)
-        r_low_idx = retention.argmin(dim=-1)
-        if retention_terms in ('highest', 'both'):
-            loss_high = losses[batch_indexer, r_high_idx].mean()
-            loss_terms.append(loss_high)
-        if retention_terms in ('lowest', 'both'):
-            loss_low = losses[batch_indexer, r_low_idx].mean()
-            loss_terms.append(loss_low)
+        loss_deltas = losses[:, :-1] - losses[:, 1:]
+        retention_deltas = retention[:, 1:] - retention[:, :-1]
+        aux = -(loss_deltas * retention_deltas).sum(dim=-1).mean()
+        loss = loss + retention_gamma * aux
 
-    loss = torch.stack(loss_terms).mean()
     return loss, loss_index_2
 
 def maze_loss(predictions, certainties, targets, cirriculum_lookahead=5, use_most_certain=True):
