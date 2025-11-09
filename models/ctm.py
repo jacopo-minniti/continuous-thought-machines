@@ -125,10 +125,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.set_backbone()
         self.positional_embedding = self.get_positional_embedding(d_backbone)
         self.kv_proj = nn.Sequential(nn.LazyLinear(self.d_input), nn.LayerNorm(self.d_input)) if heads else None
-        self.q_proj = nn.LazyLinear(self.d_input) if heads else None
+        self.q_proj = nn.LazyLinear(self.d_model) if heads else None
         self.reflect_head = nn.LazyLinear(1) if heads else None
-        self.hypothesis_projector = nn.LazyLinear(d_model) if heads else None
-        self.attention = nn.MultiheadAttention(self.d_input, heads, dropout, batch_first=True) if heads else None
+        self._reflect_bias_value = -2.0
+        self._reflect_bias_initialized = False
+        if self.reflect_head is not None:
+            self.reflect_head.register_forward_pre_hook(self._maybe_init_reflect_bias)
+        attn_kwargs = dict(dropout=dropout, batch_first=True)
+        if heads:
+            self.attention = nn.MultiheadAttention(self.d_model, heads, **attn_kwargs, kdim=self.d_input, vdim=self.d_input)
+        else:
+            self.attention = None
         
         # --- Core CTM Modules ---
         self.synapses = self.get_synapses(synapse_depth, d_model, dropout)
@@ -278,6 +285,14 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         combined_features = (self.kv_features + pos_emb).flatten(2).transpose(1, 2)
         kv = self.kv_proj(combined_features)
         return kv
+
+    def _maybe_init_reflect_bias(self, module, _inputs):
+        """
+        Ensure the reflect head bias starts below zero so initial retention leans low.
+        """
+        if not self._reflect_bias_initialized and module.bias is not None:
+            nn.init.constant_(module.bias, self._reflect_bias_value)
+            self._reflect_bias_initialized = True
 
     def compute_certainty(self, current_prediction):
         """
@@ -576,7 +591,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            evidence_hypothesis = self.hypothesis_projector(attn_out) if self.hypothesis_projector else attn_out
+            evidence_hypothesis = attn_out
             if retention is None:
                 pre_synapse_input = activated_state
             else:
