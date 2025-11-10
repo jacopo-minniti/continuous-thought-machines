@@ -84,7 +84,7 @@ def parse_args():
     parser.add_argument('--n_synch_action', type=int, default=32, help='Number of neurons to use for observation/action synch (CTM only).')
     parser.add_argument('--neuron_select_type', type=str, default='first-last', help='Protocol for selecting neuron subset (CTM only).')
     parser.add_argument('--n_random_pairing_self', type=int, default=256, help='Number of neurons paired self-to-self for synch (CTM only).')
-    parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
+    parser.add_argument('--gate_gamma', type=float, default=0.2, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
     parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed on each gate supervision step (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
@@ -443,6 +443,11 @@ if __name__=='__main__':
         if is_main_process(rank): print('Compilation finished.')
 
 
+    def unwrap_model(m):
+        return m.module if isinstance(m, DDP) else m
+
+    base_model = unwrap_model(model)
+
     # --- Training Loop ---
     model.train() # Ensure model is in train mode
     pbar = tqdm(total=args.training_iterations, initial=start_iter, leave=False, position=0, dynamic_ncols=True, disable=not is_main_process(rank))
@@ -481,9 +486,8 @@ if __name__=='__main__':
             if args.model == 'ctm':
                 predictions, certainties, synchronisation = model(inputs)
                 loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
-                gate_loss_item = None
-                gate_loss = model.get_gate_loss()
-                gamma_weight = model.module.gamma if isinstance(model, DDP) else model.gamma
+                gate_loss = base_model.get_gate_loss()
+                gamma_weight = base_model.gamma
                 if gate_loss is not None and gamma_weight > 0:
                     loss = loss + gamma_weight * gate_loss
                     gate_loss_item = gate_loss.item()
