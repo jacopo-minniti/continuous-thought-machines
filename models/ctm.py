@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 import numpy as np
 import math
@@ -98,6 +99,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  dropout_nlm=None,
                  neuron_select_type='random-pairing',  
                  n_random_pairing_self=0,
+                 gamma=0.25,
+                 probe_every=4,
+                 probe_frac=0.25,
+                 cf_projection_dim=128,
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -115,6 +120,12 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
+        self.gamma = float(gamma)
+        self.probe_every = int(probe_every) if probe_every is not None else 0
+        self.probe_frac = 0.0 if probe_frac is None else float(np.clip(probe_frac, 0.0, 1.0))
+        self.cf_projection_dim_target = cf_projection_dim
+        self.latest_gate_loss = None
+        self.latest_gate_metrics = {}
 
         # --- Assertions ---
         self.verify_args()
@@ -127,6 +138,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.kv_proj = nn.Sequential(nn.LazyLinear(self.d_input), nn.LayerNorm(self.d_input)) if heads else None
         self.q_proj = nn.LazyLinear(self.d_input) if heads else None
         self.attention = nn.MultiheadAttention(self.d_input, heads, dropout, batch_first=True) if heads else None
+        self.attention_readout = nn.Linear(self.d_input, self.d_model)
         
         # --- Core CTM Modules ---
         self.synapses = self.get_synapses(synapse_depth, d_model, dropout)
@@ -146,6 +158,21 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         if self.synch_representation_size_action:  # if not zero
             self.set_synchronisation_parameters('action', self.n_synch_action, n_random_pairing_self)
         self.set_synchronisation_parameters('out', self.n_synch_out, n_random_pairing_self)
+
+        if self.synch_representation_size_action:
+            gate_hidden = max(64, min(256, self.synch_representation_size_action * 2))
+            self.gate_head = nn.Sequential(
+                nn.LayerNorm(self.synch_representation_size_action),
+                nn.Linear(self.synch_representation_size_action, gate_hidden),
+                nn.SiLU(),
+                nn.Linear(gate_hidden, 1)
+            )
+        else:
+            self.gate_head = None
+
+        cf_dim = min(self.cf_projection_dim_target, self.synch_representation_size_out) if self.synch_representation_size_out else 0
+        self.cf_projection_dim = cf_dim
+        self.cf_projector = nn.Linear(self.synch_representation_size_out, cf_dim, bias=False) if cf_dim else None
 
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
@@ -521,12 +548,97 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             raise ValueError(f"Invalid neuron selection type: {self.neuron_select_type}")
         return synch_representation_size
 
+    def _project_counterfactual(self, synchronisation_vector):
+        if self.cf_projector is None or synchronisation_vector is None:
+            return None
+        return self.cf_projector(synchronisation_vector)
+
+    def _sample_probe_indices(self, batch_size, device):
+        if self.probe_frac <= 0 or self.probe_frac is None:
+            return torch.empty(0, dtype=torch.long, device=device)
+        if self.probe_frac >= 1.0:
+            return torch.arange(batch_size, device=device)
+        mask = torch.rand(batch_size, device=device) < self.probe_frac
+        return mask.nonzero(as_tuple=False).flatten()
+
+    def _compute_gate_target(
+        self,
+        prev_activated_state,
+        o_t,
+        state_trace_prev,
+        idx,
+        decay_alpha_out_prev,
+        decay_beta_out_prev,
+        r_out,
+        synch_out_prev,
+        device,
+    ):
+        if self.cf_projector is None or synch_out_prev is None or idx.numel() == 0:
+            return None, None
+
+        with torch.no_grad():
+            v_t = self._project_counterfactual(synch_out_prev[idx])
+            if v_t is None:
+                return None, None
+
+            ingest_state = self.synapses(o_t[idx])
+            reflect_state = self.synapses(prev_activated_state[idx])
+
+            ingest_trace = torch.cat((state_trace_prev[idx, :, 1:], ingest_state.unsqueeze(-1)), dim=-1)
+            reflect_trace = torch.cat((state_trace_prev[idx, :, 1:], reflect_state.unsqueeze(-1)), dim=-1)
+
+            ingest_activation = self.trace_processor(ingest_trace)
+            reflect_activation = self.trace_processor(reflect_trace)
+
+            da_prev = None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx]
+            db_prev = None if decay_beta_out_prev is None else decay_beta_out_prev[idx]
+            r_slice = r_out[idx]
+
+            synch_ing, _, _ = self.compute_synchronisation(ingest_activation, da_prev, db_prev, r_slice, synch_type='out')
+            synch_ref, _, _ = self.compute_synchronisation(reflect_activation, da_prev, db_prev, r_slice, synch_type='out')
+
+            v_ing = self._project_counterfactual(synch_ing)
+            v_ref = self._project_counterfactual(synch_ref)
+            if v_ing is None or v_ref is None:
+                return None, None
+
+            delta_ing = torch.linalg.norm(v_ing - v_t, dim=-1)
+            delta_ref = torch.linalg.norm(v_ref - v_t, dim=-1)
+            r_star = torch.where(delta_ing > delta_ref, torch.zeros_like(delta_ing), torch.ones_like(delta_ref)).unsqueeze(-1)
+            open_frac = (r_star == 0).float().mean().item()
+
+        return r_star.to(device), open_frac
+
+    def get_gate_loss(self):
+        return self.latest_gate_loss
+
+    def get_gate_metrics(self):
+        return self.latest_gate_metrics
+
 
 
 
     def forward(self, x, track=False):
         B = x.size(0)
         device = x.device
+
+        self.latest_gate_loss = None
+        self.latest_gate_metrics = {}
+        gate_losses = []
+        gate_value_sum = 0.0
+        gate_value_count = 0
+        gate_probe_accuracy_sum = 0.0
+        gate_probe_open_sum = 0.0
+        gate_probe_count = 0
+
+        gate_supervision_active = (
+            self.training
+            and self.gamma > 0
+            and self.probe_every > 0
+            and self.probe_frac > 0
+            and self.gate_head is not None
+            and self.cf_projector is not None
+        )
 
         # --- Tracking Initialization ---
         pre_activations_tracking = []
@@ -550,37 +662,72 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         decay_alpha_action, decay_beta_action = None, None
         self.decay_params_action.data = torch.clamp(self.decay_params_action, 0, 15)  # Fix from github user: kuviki
         self.decay_params_out.data = torch.clamp(self.decay_params_out, 0, 15)
-        r_action, r_out = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1), torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
+        r_action = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1)
+        r_out = torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
-        _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
-        # Compute learned weighting for synchronisation
-        
+        synchronisation_out_prev, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
+        synchronisation_out_prev = synchronisation_out_prev.detach()
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
+            state_trace_prev = state_trace
+            prev_activated_state = activated_state
 
             # --- Calculate Synchronisation for Input Data Interaction ---
-            synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
+            synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(prev_activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
 
             # --- Interact with Data via Attention ---
             q = self.q_proj(synchronisation_action).unsqueeze(1)
             attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
             attn_out = attn_out.squeeze(1)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            o_t = self.attention_readout(attn_out)
+
+            if self.gate_head is not None:
+                gate_logits = self.gate_head(synchronisation_action)
+                gate_values = torch.sigmoid(gate_logits)
+                gate_value_sum += gate_values.detach().mean().item()
+                gate_value_count += 1
+            else:
+                gate_logits = None
+                gate_values = torch.ones(prev_activated_state.size(0), 1, device=device, dtype=prev_activated_state.dtype)
 
             # --- Apply Synapses ---
-            state = self.synapses(pre_synapse_input)
-            # The 'state_trace' is the history of incoming pre-activations
-            state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
+            synapse_input = gate_values * prev_activated_state + (1 - gate_values) * o_t
+            state = self.synapses(synapse_input)
+            state_trace = torch.cat((state_trace_prev[:, :, 1:], state.unsqueeze(-1)), dim=-1)
 
             # --- Apply Neuron-Level Models ---
             activated_state = self.trace_processor(state_trace)
-            # One would also keep an 'activated_state_trace' as the history of outgoing post-activations
-            # BUT, this is unnecessary because the synchronisation calculation is fully linear and can be
-            # done using only the currect activated state (see compute_synchronisation method for explanation)
 
             # --- Calculate Synchronisation for Output Predictions ---
+            decay_alpha_out_prev = decay_alpha_out
+            decay_beta_out_prev = decay_beta_out
             synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
+
+            # --- Training-time counterfactual supervision ---
+            if gate_supervision_active and (stepi % self.probe_every == 0) and gate_logits is not None and synchronisation_out_prev is not None:
+                probe_idx = self._sample_probe_indices(B, device)
+                if probe_idx.numel() > 0:
+                    r_star, open_frac = self._compute_gate_target(
+                        prev_activated_state,
+                        o_t,
+                        state_trace_prev,
+                        probe_idx,
+                        decay_alpha_out_prev,
+                        decay_beta_out_prev,
+                        r_out,
+                        synchronisation_out_prev,
+                        device,
+                    )
+                    if r_star is not None:
+                        gate_loss = F.binary_cross_entropy_with_logits(gate_logits[probe_idx], r_star)
+                        gate_losses.append(gate_loss)
+                        gate_probe_count += 1
+                        gate_probe_open_sum += open_frac
+                        gate_predictions = (torch.sigmoid(gate_logits[probe_idx].detach()) >= 0.5).float()
+                        gate_probe_accuracy_sum += (gate_predictions == r_star).float().mean().item()
+
+            synchronisation_out_prev = synchronisation_out.detach()
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
@@ -597,8 +744,25 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
                 synch_action_tracking.append(synchronisation_action.detach().cpu().numpy())
 
+        if gate_losses:
+            self.latest_gate_loss = torch.stack(gate_losses).mean()
+        elif gate_supervision_active:
+            self.latest_gate_loss = torch.tensor(0.0, device=device)
+        else:
+            self.latest_gate_loss = None
+
+        if gate_value_count:
+            mean_gate_value = gate_value_sum / gate_value_count
+            self.latest_gate_metrics = {
+                'mean_gate_value': mean_gate_value,
+                'num_probes': gate_probe_count,
+                'probe_accuracy': (gate_probe_accuracy_sum / gate_probe_count) if gate_probe_count else None,
+                'probe_open_frac': (gate_probe_open_sum / gate_probe_count) if gate_probe_count else None,
+            }
+        else:
+            self.latest_gate_metrics = {}
+
         # --- Return Values ---
         if track:
             return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
         return predictions, certainties, synchronisation_out
-

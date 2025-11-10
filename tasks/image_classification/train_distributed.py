@@ -84,6 +84,9 @@ def parse_args():
     parser.add_argument('--n_synch_action', type=int, default=32, help='Number of neurons to use for observation/action synch (CTM only).')
     parser.add_argument('--neuron_select_type', type=str, default='first-last', help='Protocol for selecting neuron subset (CTM only).')
     parser.add_argument('--n_random_pairing_self', type=int, default=256, help='Number of neurons paired self-to-self for synch (CTM only).')
+    parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
+    parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
+    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed on each gate supervision step (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=4, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -244,6 +247,9 @@ if __name__=='__main__':
             dropout_nlm=args.dropout_nlm,
             neuron_select_type=args.neuron_select_type,
             n_random_pairing_self=args.n_random_pairing_self,
+            gamma=args.gate_gamma,
+            probe_every=args.probe_every,
+            probe_frac=args.probe_frac,
         ).to(device)
     elif args.model == 'lstm':
         model_base = LSTMBaseline(
@@ -467,6 +473,7 @@ if __name__=='__main__':
         loss = None
         # Model-specific forward and loss calculation
         time_start_forward = time.time()
+        gate_loss_item = None
         with torch.autocast(device_type="cuda" if device.type == 'cuda' else "cpu", dtype=torch.float16, enabled=args.use_amp):
             if args.do_compile:
                  torch.compiler.cudagraph_mark_step_begin()
@@ -474,6 +481,12 @@ if __name__=='__main__':
             if args.model == 'ctm':
                 predictions, certainties, synchronisation = model(inputs)
                 loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                gate_loss_item = None
+                gate_loss = model.get_gate_loss()
+                gamma_weight = model.module.gamma if isinstance(model, DDP) else model.gamma
+                if gate_loss is not None and gamma_weight > 0:
+                    loss = loss + gamma_weight * gate_loss
+                    gate_loss_item = gate_loss.item()
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
                 loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
@@ -509,7 +522,8 @@ if __name__=='__main__':
              if args.model in ['ctm', 'lstm']:
                 accuracy_local = (predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain] == targets).float().mean().item()
                 where_certain_tensor = where_most_certain.float() # Use rank 0's tensor for stats
-                pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f} WhereCert(loc)={where_certain_tensor.mean().item():.2f}'
+                pg_desc = f' PG={gate_loss_item:0.3f}' if gate_loss_item is not None else ''
+                pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f}{pg_desc} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f} WhereCert(loc)={where_certain_tensor.mean().item():.2f}'
              elif args.model == 'ff':
                 accuracy_local = (predictions.argmax(1) == targets).float().mean().item()
                 pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f}'

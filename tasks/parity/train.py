@@ -45,6 +45,9 @@ def parse_args():
     parser.add_argument('--n_synch_action', type=int, default=32, help='Number of neurons for action sync.')
     parser.add_argument('--neuron_select_type', type=str, default='random', choices=['first-last', 'random', 'random-pairing'], help='Protocol for selecting neuron subset.')
     parser.add_argument('--n_random_pairing_self', type=int, default=256, help='Number of neurons paired self-to-self for synch.')
+    parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
+    parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
+    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed for gate supervision (CTM only).')
     parser.add_argument('--iterations', type=int, default=75, help='Number of internal ticks.')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of pre-activation history for NLMs.')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep NLMs.')
@@ -216,10 +219,16 @@ if __name__=='__main__':
             inputs = inputs.to(device)
             targets = targets.to(device)
             
+            gate_loss_item = None
             with torch.autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=torch.float16, enabled=args.use_amp):
                 predictions, certainties, synchronisation = model(inputs)
                 predictions = predictions.reshape(predictions.size(0), -1, 2, predictions.size(-1))
                 loss, where_most_certain = parity_loss(predictions, certainties, targets, use_most_certain=args.use_most_certain)
+                if args.model_type == 'ctm':
+                    gate_loss = model.get_gate_loss()
+                    if gate_loss is not None and model.gamma > 0:
+                        loss = loss + model.gamma * gate_loss
+                        gate_loss_item = gate_loss.item()
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -228,7 +237,8 @@ if __name__=='__main__':
             scheduler.step()
 
             accuracy_finegrained = (predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device),:,where_most_certain] == targets).float().mean().item()
-            pbar.set_description(f'Dataset=Parity. Loss={loss.item():0.3f}. Accuracy={accuracy_finegrained:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})')
+            gate_desc = f', PG={gate_loss_item:0.3f}' if gate_loss_item is not None else ''
+            pbar.set_description(f'Dataset=Parity. Loss={loss.item():0.3f}{gate_desc}. Accuracy={accuracy_finegrained:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})')
 
             # Metrics tracking and plotting
             if bi%args.track_every==0:# and bi != 0:
@@ -402,5 +412,3 @@ if __name__=='__main__':
                     } , f'{args.log_dir}/checkpoint_{bi}.pt')
             
             pbar.update(1)
-
-

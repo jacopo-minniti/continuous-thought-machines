@@ -75,6 +75,9 @@ def parse_args():
     parser.add_argument('--n_synch_action', type=int, default=32, help='Number of neurons to use for observation/action synch (CTM only).') # Default changed
     parser.add_argument('--neuron_select_type', type=str, default='random-pairing', help='Protocol for selecting neuron subset (CTM only).')
     parser.add_argument('--n_random_pairing_self', type=int, default=0, help='Number of neurons paired self-to-self for synch (CTM only).')
+    parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
+    parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
+    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed for gate supervision (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True,
                         help='Use deep memory (CTM only).')
@@ -179,11 +182,14 @@ if __name__=='__main__':
             backbone_type=args.backbone_type,
             positional_embedding_type=args.positional_embedding_type,
             out_dims=args.out_dims,
-            prediction_reshaper=prediction_reshaper, 
+            prediction_reshaper=prediction_reshaper,
             dropout=args.dropout,
             dropout_nlm=args.dropout_nlm,
             neuron_select_type=args.neuron_select_type,
             n_random_pairing_self=args.n_random_pairing_self,
+            gamma=args.gate_gamma,
+            probe_every=args.probe_every,
+            probe_frac=args.probe_frac,
         ).to(device)
     elif args.model == 'lstm':
          model = LSTMBaseline(
@@ -369,6 +375,7 @@ if __name__=='__main__':
 
 
             # Model-specific forward, reshape, and loss calculation
+            gate_loss_item = None
             with torch.autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=torch.float16, enabled=args.use_amp):
                 if args.do_compile: # CUDAGraph marking applied if compiling any model
                      torch.compiler.cudagraph_mark_step_begin()
@@ -379,6 +386,10 @@ if __name__=='__main__':
                     # Reshape predictions: (B, SeqLength, 5, Ticks)
                     predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1))
                     loss, where_most_certain, upto_where = maze_loss(predictions, certainties, targets, cirriculum_lookahead=args.cirriculum_lookahead, use_most_certain=True)
+                    gate_loss = model.get_gate_loss()
+                    if gate_loss is not None and model.gamma > 0:
+                        loss = loss + model.gamma * gate_loss
+                        gate_loss_item = gate_loss.item()
                     # Accuracy uses predictions[B, S, C, T] indexed at where_most_certain[B] -> gives (B, S, C) -> argmax(2) -> (B,S)
                     accuracy_finegrained = (predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] == targets).float().mean().item()
 
@@ -433,7 +444,8 @@ if __name__=='__main__':
             scheduler.step()
 
             # Conditional Tqdm Description
-            pbar_desc = f'Loss={loss.item():0.3f}. Acc(step)={accuracy_finegrained:0.3f}. LR={current_lr:0.6f}.'
+            gate_desc = f' PG={gate_loss_item:0.3f}' if gate_loss_item is not None else ''
+            pbar_desc = f'Loss={loss.item():0.3f}{gate_desc}. Acc(step)={accuracy_finegrained:0.3f}. LR={current_lr:0.6f}.'
             if args.model in ['ctm', 'lstm'] or torch.is_tensor(where_most_certain): # Show stats if available
                  pbar_desc += f' Where_certain={where_most_certain_val:0.2f}+-{where_most_certain_std:0.2f} ({where_most_certain_min:d}<->{where_most_certain_max:d}).'
             if isinstance(upto_where, (np.ndarray, list)) and len(upto_where) > 0:

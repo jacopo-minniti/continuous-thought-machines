@@ -81,6 +81,9 @@ def parse_args():
     parser.add_argument('--n_synch_action', type=int, default=512, help='Number of neurons to use for observation/action synch (CTM only).')
     parser.add_argument('--neuron_select_type', type=str, default='random-pairing', help='Protocol for selecting neuron subset (CTM only).')
     parser.add_argument('--n_random_pairing_self', type=int, default=0, help='Number of neurons paired self-to-self for synch (CTM only).')
+    parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
+    parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
+    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed each time (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=4, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -244,6 +247,9 @@ if __name__=='__main__':
             dropout_nlm=args.dropout_nlm,
             neuron_select_type=args.neuron_select_type,
             n_random_pairing_self=args.n_random_pairing_self,
+            gamma=args.gate_gamma,
+            probe_every=args.probe_every,
+            probe_frac=args.probe_frac,
         ).to(device)
     elif args.model == 'lstm':
          model = LSTMBaseline(
@@ -407,8 +413,14 @@ if __name__=='__main__':
                 if args.model == 'ctm':
                     predictions, certainties, synchronisation = model(inputs)
                     loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                    gate_loss_item = None
+                    gate_loss = model.get_gate_loss()
+                    if gate_loss is not None and model.gamma > 0:
+                        loss = loss + model.gamma * gate_loss
+                        gate_loss_item = gate_loss.item()
                     accuracy = (predictions.argmax(1)[torch.arange(predictions.size(0), device=predictions.device),where_most_certain] == targets).float().mean().item()
-                    pbar_desc = f'CTM Loss={loss.item():0.3f}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})'
+                    gate_desc = f', PG={gate_loss_item:0.3f}' if gate_loss_item is not None else ''
+                    pbar_desc = f'CTM Loss={loss.item():0.3f}{gate_desc}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})'
 
                 elif args.model == 'lstm':
                     predictions, certainties, synchronisation = model(inputs)

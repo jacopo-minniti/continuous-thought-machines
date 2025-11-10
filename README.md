@@ -112,6 +112,17 @@ While we have provided reasonable defaults in the argparsers of each training se
 ```
 python -m tasks.image_classification.train
 ```
+
+### Perceptual Gate (CTM+PG)
+
+The CTM now includes the Perceptual Gate (PG) described in the CTM+PG report. Every CTM training script exposes three knobs to control it:
+
+- `--gate_gamma`: scales the gate supervision loss (internally referred to as `gamma`). Set it to `0` to disable the auxiliary supervision.
+- `--probe_every`: runs the counterfactual fork every _n_ ticks to label the gate.
+- `--probe_frac`: probes only a fraction of each batch to manage the added compute cost.
+
+Defaults (γ≈0.25, probe every 4 ticks on 25% of the batch) match the reference configuration, but feel free to tune them per task.
+
 For debugging in VSCode, this configuration example might be helpful to you:
 ```
 {
