@@ -284,9 +284,15 @@ if __name__=='__main__':
 
     # Wrap model with DDP
     if device.type == 'cuda' and world_size > 1:
-        model = DDP(model_base, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(
+            model_base,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+            broadcast_buffers=False,
+        )
     elif device.type == 'cpu' and world_size > 1:
-        model = DDP(model_base) # No device_ids for CPU
+        model = DDP(model_base, find_unused_parameters=True) # No device_ids for CPU
     else: # Single process run
         model = model_base # No DDP wrapping needed
 
