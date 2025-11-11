@@ -126,6 +126,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.cf_projection_dim_target = cf_projection_dim
         self.latest_gate_loss = None
         self.latest_gate_metrics = {}
+        self.latest_gate_sequence = None
 
         # --- Assertions ---
         self.verify_args()
@@ -615,6 +616,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
     def get_gate_metrics(self):
         return self.latest_gate_metrics
 
+    def get_latest_gate_sequence(self):
+        return self.latest_gate_sequence
+
 
 
 
@@ -624,12 +628,14 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
         self.latest_gate_loss = None
         self.latest_gate_metrics = {}
+        self.latest_gate_sequence = None
         gate_losses = []
         gate_value_sum = 0.0
         gate_value_count = 0
         gate_probe_accuracy_sum = 0.0
         gate_probe_open_sum = 0.0
         gate_probe_count = 0
+        gate_history = []
 
         gate_supervision_active = (
             self.training
@@ -685,6 +691,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             if self.gate_head is not None:
                 gate_logits = self.gate_head(synchronisation_action)
                 gate_values = torch.sigmoid(gate_logits)
+                gate_history.append(gate_values.detach())
                 gate_value_sum += gate_values.detach().mean().item()
                 gate_value_count += 1
             else:
@@ -761,6 +768,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             }
         else:
             self.latest_gate_metrics = {}
+
+        if gate_history:
+            self.latest_gate_sequence = torch.stack(gate_history, dim=-1)
+        else:
+            self.latest_gate_sequence = None
 
         # --- Return Values ---
         if track:

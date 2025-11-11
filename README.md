@@ -123,6 +123,8 @@ The CTM now includes the Perceptual Gate (PG) described in the CTM+PG report. Ev
 
 Defaults (γ≈0.25, probe every 4 ticks on 25% of the batch) match the reference configuration, but feel free to tune them per task.
 
+To inspect how the gate behaves, use `tasks/image_classification/analysis/plot_gate_retention.py` to load a checkpoint and plot the mean ±95 % CI of `r_t` over the desired tick range.
+
 For debugging in VSCode, this configuration example might be helpful to you:
 ```
 {
