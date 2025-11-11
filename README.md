@@ -119,9 +119,9 @@ The CTM now includes the Perceptual Gate (PG) described in the CTM+PG report. Ev
 
 - `--gate_gamma`: scales the gate supervision loss (internally referred to as `gamma`). Set it to `0` to disable the auxiliary supervision.
 - `--probe_every`: runs the counterfactual fork every _n_ ticks to label the gate.
-- `--probe_frac`: probes only a fraction of each batch to manage the added compute cost.
+- `--gate_margin`: ignores tiny CE differences when picking ingest vs reflect, preventing label flicker.
 
-Defaults (γ≈0.25, probe every 4 ticks on 25% of the batch) match the reference configuration, but feel free to tune them per task.
+Defaults (γ≈0.25, probe every 4 ticks, margin≈0.02) match the reference configuration, but feel free to tune them per task. During training we run a one-step counterfactual branch and label the gate by whichever fork lowers the task loss beyond the `gate_margin`.
 
 To inspect how the gate behaves, use `tasks/image_classification/analysis/plot_gate_retention.py` to load a checkpoint and plot the mean ±95 % CI of `r_t` over the desired tick range.
 

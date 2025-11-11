@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument('--n_random_pairing_self', type=int, default=256, help='Number of neurons paired self-to-self for synch.')
     parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
-    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed for gate supervision (CTM only).')
+    parser.add_argument('--gate_margin', type=float, default=0.02, help='Margin when comparing ingest vs reflect task loss (CTM only).')
     parser.add_argument('--iterations', type=int, default=75, help='Number of internal ticks.')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of pre-activation history for NLMs.')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep NLMs.')

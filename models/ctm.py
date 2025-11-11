@@ -101,8 +101,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  n_random_pairing_self=0,
                  gamma=0.25,
                  probe_every=4,
-                 probe_frac=0.25,
-                 cf_projection_dim=128,
+                 gate_margin=0.02,
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -122,10 +121,12 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
         self.gamma = float(gamma)
         self.probe_every = int(probe_every) if probe_every is not None else 0
-        self.probe_frac = 0.0 if probe_frac is None else float(np.clip(probe_frac, 0.0, 1.0))
-        self.cf_projection_dim_target = cf_projection_dim
+        self.gate_margin = float(gate_margin)
         self.latest_gate_loss = None
         self.latest_gate_metrics = {}
+        self.latest_gate_sequence = None
+        self._gate_targets = None
+        self._gate_loss_fn = None
         self.latest_gate_sequence = None
 
         # --- Assertions ---
@@ -170,10 +171,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             )
         else:
             self.gate_head = None
-
-        cf_dim = min(self.cf_projection_dim_target, self.synch_representation_size_out) if self.synch_representation_size_out else 0
-        self.cf_projection_dim = cf_dim
-        self.cf_projector = nn.Linear(self.synch_representation_size_out, cf_dim, bias=False) if cf_dim else None
 
         # --- Output Procesing ---
         self.output_projector = nn.Sequential(nn.LazyLinear(self.out_dims))
@@ -549,66 +546,69 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             raise ValueError(f"Invalid neuron selection type: {self.neuron_select_type}")
         return synch_representation_size
 
-    def _project_counterfactual(self, synchronisation_vector):
-        if self.cf_projector is None or synchronisation_vector is None:
-            return None
-        return self.cf_projector(synchronisation_vector)
-
-    def _sample_probe_indices(self, batch_size, device):
-        if self.probe_frac <= 0 or self.probe_frac is None:
-            return torch.empty(0, dtype=torch.long, device=device)
-        if self.probe_frac >= 1.0:
-            return torch.arange(batch_size, device=device)
-        mask = torch.rand(batch_size, device=device) < self.probe_frac
-        return mask.nonzero(as_tuple=False).flatten()
-
     def _compute_gate_target(
         self,
         prev_activated_state,
         o_t,
         state_trace_prev,
-        idx,
         decay_alpha_out_prev,
         decay_beta_out_prev,
         r_out,
-        synch_out_prev,
-        device,
+        idx,
     ):
-        if self.cf_projector is None or synch_out_prev is None or idx.numel() == 0:
+        loss_fn = self._gate_loss_fn
+        targets = self._gate_targets
+        if loss_fn is None or targets is None or idx.numel() == 0:
             return None, None
 
         with torch.no_grad():
-            v_t = self._project_counterfactual(synch_out_prev[idx])
-            if v_t is None:
-                return None, None
+            logits_ing = self._one_step_logits(
+                o_t[idx],
+                state_trace_prev[idx],
+                None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx],
+                None if decay_beta_out_prev is None else decay_beta_out_prev[idx],
+                r_out[idx],
+            )
+            logits_ref = self._one_step_logits(
+                prev_activated_state[idx],
+                state_trace_prev[idx],
+                None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx],
+                None if decay_beta_out_prev is None else decay_beta_out_prev[idx],
+                r_out[idx],
+            )
 
-            ingest_state = self.synapses(o_t[idx])
-            reflect_state = self.synapses(prev_activated_state[idx])
+            ce_ing = loss_fn(logits_ing, targets[idx])
+            ce_ref = loss_fn(logits_ref, targets[idx])
 
-            ingest_trace = torch.cat((state_trace_prev[idx, :, 1:], ingest_state.unsqueeze(-1)), dim=-1)
-            reflect_trace = torch.cat((state_trace_prev[idx, :, 1:], reflect_state.unsqueeze(-1)), dim=-1)
+            better_ing = (ce_ing + self.gate_margin) < ce_ref
+            zero_one_shape = (logits_ing.size(0), 1)
+            zeros = torch.zeros(zero_one_shape, device=logits_ing.device, dtype=logits_ing.dtype)
+            ones = torch.ones(zero_one_shape, device=logits_ing.device, dtype=logits_ing.dtype)
+            r_star = torch.where(better_ing.unsqueeze(-1), zeros, ones)
+            open_frac = better_ing.float().mean().item()
 
-            ingest_activation = self.trace_processor(ingest_trace)
-            reflect_activation = self.trace_processor(reflect_trace)
+        return r_star, open_frac
 
-            da_prev = None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx]
-            db_prev = None if decay_beta_out_prev is None else decay_beta_out_prev[idx]
-            r_slice = r_out[idx]
-
-            synch_ing, _, _ = self.compute_synchronisation(ingest_activation, da_prev, db_prev, r_slice, synch_type='out')
-            synch_ref, _, _ = self.compute_synchronisation(reflect_activation, da_prev, db_prev, r_slice, synch_type='out')
-
-            v_ing = self._project_counterfactual(synch_ing)
-            v_ref = self._project_counterfactual(synch_ref)
-            if v_ing is None or v_ref is None:
-                return None, None
-
-            delta_ing = torch.linalg.norm(v_ing - v_t, dim=-1)
-            delta_ref = torch.linalg.norm(v_ref - v_t, dim=-1)
-            r_star = torch.where(delta_ing > delta_ref, torch.zeros_like(delta_ing), torch.ones_like(delta_ref)).unsqueeze(-1)
-            open_frac = (r_star == 0).float().mean().item()
-
-        return r_star.to(device), open_frac
+    def _one_step_logits(
+        self,
+        synapse_input,
+        state_trace_prev_slice,
+        decay_alpha_out_prev_slice,
+        decay_beta_out_prev_slice,
+        r_out_slice,
+    ):
+        state = self.synapses(synapse_input)
+        state_trace_next = torch.cat((state_trace_prev_slice[:, :, 1:], state.unsqueeze(-1)), dim=-1)
+        activation = self.trace_processor(state_trace_next)
+        synch_out, _, _ = self.compute_synchronisation(
+            activation,
+            decay_alpha_out_prev_slice,
+            decay_beta_out_prev_slice,
+            r_out_slice,
+            synch_type='out',
+        )
+        logits = self.output_projector(synch_out)
+        return logits
 
     def get_gate_loss(self):
         return self.latest_gate_loss
@@ -618,6 +618,14 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
     def get_latest_gate_sequence(self):
         return self.latest_gate_sequence
+
+    def set_gate_supervision(self, targets, loss_fn):
+        """
+        Provide per-sample targets and a reduction='none' loss_fn to supervise the gate.
+        Pass None to disable supervision for the next forward call.
+        """
+        self._gate_targets = targets
+        self._gate_loss_fn = loss_fn
 
 
 
@@ -641,9 +649,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             self.training
             and self.gamma > 0
             and self.probe_every > 0
-            and self.probe_frac > 0
             and self.gate_head is not None
-            and self.cf_projector is not None
+            and self._gate_targets is not None
+            and self._gate_loss_fn is not None
         )
 
         # --- Tracking Initialization ---
@@ -671,8 +679,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         r_action = torch.exp(-self.decay_params_action).unsqueeze(0).repeat(B, 1)
         r_out = torch.exp(-self.decay_params_out).unsqueeze(0).repeat(B, 1)
 
-        synchronisation_out_prev, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
-        synchronisation_out_prev = synchronisation_out_prev.detach()
+        _, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, None, None, r_out, synch_type='out')
 
         # --- Recurrent Loop  ---
         for stepi in range(self.iterations):
@@ -712,19 +719,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             synchronisation_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
 
             # --- Training-time counterfactual supervision ---
-            if gate_supervision_active and (stepi % self.probe_every == 0) and gate_logits is not None and synchronisation_out_prev is not None:
-                probe_idx = self._sample_probe_indices(B, device)
+            if gate_supervision_active and (stepi % self.probe_every == 0) and gate_logits is not None:
+                probe_idx = torch.arange(B, device=device)
                 if probe_idx.numel() > 0:
                     r_star, open_frac = self._compute_gate_target(
                         prev_activated_state,
                         o_t,
                         state_trace_prev,
-                        probe_idx,
                         decay_alpha_out_prev,
                         decay_beta_out_prev,
                         r_out,
-                        synchronisation_out_prev,
-                        device,
+                        probe_idx,
                     )
                     if r_star is not None:
                         gate_loss = F.binary_cross_entropy_with_logits(gate_logits[probe_idx], r_star)
@@ -733,8 +738,6 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                         gate_probe_open_sum += open_frac
                         gate_predictions = (torch.sigmoid(gate_logits[probe_idx].detach()) >= 0.5).float()
                         gate_probe_accuracy_sum += (gate_predictions == r_star).float().mean().item()
-
-            synchronisation_out_prev = synchronisation_out.detach()
 
             # --- Get Predictions and Certainties ---
             current_prediction = self.output_projector(synchronisation_out)
@@ -773,6 +776,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             self.latest_gate_sequence = torch.stack(gate_history, dim=-1)
         else:
             self.latest_gate_sequence = None
+
+        self._gate_targets = None
+        self._gate_loss_fn = None
 
         # --- Return Values ---
         if track:

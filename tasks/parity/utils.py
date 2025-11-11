@@ -27,7 +27,7 @@ def prepare_model(prediction_reshaper, args, device):
             n_random_pairing_self=args.n_random_pairing_self,
             gamma=args.gate_gamma,
             probe_every=args.probe_every,
-            probe_frac=args.probe_frac,
+            gate_margin=args.gate_margin,
         ).to(device)
     elif args.model_type == 'lstm':
         model = LSTMBaseline(

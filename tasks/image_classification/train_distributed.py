@@ -86,7 +86,7 @@ def parse_args():
     parser.add_argument('--n_random_pairing_self', type=int, default=256, help='Number of neurons paired self-to-self for synch (CTM only).')
     parser.add_argument('--gate_gamma', type=float, default=0.2, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
-    parser.add_argument('--probe_frac', type=float, default=0.25, help='Fraction of batch items probed on each gate supervision step (CTM only).')
+    parser.add_argument('--gate_margin', type=float, default=0.02, help='Margin when comparing ingest vs reflect CE (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=4, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -249,7 +249,7 @@ if __name__=='__main__':
             n_random_pairing_self=args.n_random_pairing_self,
             gamma=args.gate_gamma,
             probe_every=args.probe_every,
-            probe_frac=args.probe_frac,
+            gate_margin=args.gate_margin,
         ).to(device)
     elif args.model == 'lstm':
         model_base = LSTMBaseline(
@@ -330,6 +330,8 @@ if __name__=='__main__':
                                     lr=args.lr,
                                     eps=1e-8 if not args.use_amp else 1e-6,
                                     weight_decay=args.weight_decay)
+
+    gate_supervision_loss = nn.CrossEntropyLoss(reduction='none') if args.model == 'ctm' else None
 
     warmup_schedule = warmup(args.warmup_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup_schedule.step)
@@ -482,6 +484,8 @@ if __name__=='__main__':
         time_end_data = time.time()
 
         loss = None
+        if args.model == 'ctm':
+            unwrap_model(model).set_gate_supervision(targets, gate_supervision_loss)
         # Model-specific forward and loss calculation
         time_start_forward = time.time()
         gate_loss_item = None

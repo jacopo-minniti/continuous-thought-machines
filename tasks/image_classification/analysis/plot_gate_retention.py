@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument("--n_random_pairing_self", type=int, default=0)
     parser.add_argument("--gate_gamma", type=float, default=0.0)
     parser.add_argument("--probe_every", type=int, default=0)
-    parser.add_argument("--probe_frac", type=float, default=0.0)
+    parser.add_argument("--gate_margin", type=float, default=0.02)
 
     return parser.parse_args()
 
@@ -70,7 +70,7 @@ def load_model(args, out_dims):
         n_random_pairing_self=args.n_random_pairing_self,
         gamma=args.gate_gamma,
         probe_every=args.probe_every,
-        probe_frac=args.probe_frac,
+        gate_margin=args.gate_margin,
     )
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
