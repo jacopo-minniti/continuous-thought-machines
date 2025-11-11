@@ -73,7 +73,7 @@ def load_model(args, out_dims):
         probe_frac=args.probe_frac,
     )
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     missing, unexpected = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     print(f"Loaded checkpoint with missing={missing}, unexpected={unexpected}")
     return model
