@@ -25,3 +25,4 @@ checkpoints
 utils/hugging_face/
 .venv
 .cache
+jobs
