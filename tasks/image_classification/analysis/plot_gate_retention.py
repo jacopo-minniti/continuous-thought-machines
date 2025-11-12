@@ -131,8 +131,8 @@ def main():
 
     ticks = torch.arange(1, len(stats["mean"]) + 1)
     plt.figure(figsize=(10, 5))
-    plt.plot(ticks, stats["p50"], label="Median r_t", color="tab:blue", linewidth=2)
-    plt.plot(ticks, stats["mean"], label="Mean r_t", color="tab:blue", linestyle="--", linewidth=1.5)
+    plt.plot(ticks, stats["p50"], label="Median $r_t$", color="tab:blue", linewidth=2)
+    plt.plot(ticks, stats["mean"], label="Mean $r_t$", color="tab:blue", linestyle="--", linewidth=1.5)
     plt.fill_between(
         ticks,
         stats["p25"],
@@ -150,7 +150,7 @@ def main():
         label="10th-90th percentile",
     )
     plt.xlabel("Tick (t)")
-    plt.ylabel("Retention gate r_t")
+    plt.ylabel("Retention gate $r_t$")
     plt.title("Perceptual Gate Retention Statistics")
     plt.ylim(0, 1)
     plt.legend(loc="best")
