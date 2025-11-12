@@ -84,6 +84,7 @@ def parse_args():
     parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
     parser.add_argument('--gate_margin', type=float, default=0.02, help='Margin when comparing ingest vs reflect task loss (CTM only).')
+    parser.add_argument('--pg_log_every', type=int, default=0, help='Log PG diagnostics every N iterations (0=disable).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=4, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -452,6 +453,21 @@ if __name__=='__main__':
             scheduler.step()
 
             pbar.set_description(f'Dataset={args.dataset}. Model={args.model}. {pbar_desc}')
+
+            if args.model == 'ctm' and args.pg_log_every > 0 and bi % args.pg_log_every == 0:
+                pg_metrics = model.get_gate_metrics() or {}
+                def fmt(key):
+                    value = pg_metrics.get(key)
+                    return f"{value:.3f}" if value is not None else "nan"
+                msg = (
+                    f"[PG iter {bi}] "
+                    f"mean_r={fmt('mean_gate_value')} "
+                    f"open_frac={fmt('probe_open_frac')} "
+                    f"ce_ing={fmt('gate_ce_ing')} "
+                    f"ce_ref={fmt('gate_ce_ref')} "
+                    f"gate_bce={fmt('gate_bce')}"
+                )
+                pbar.write(msg)
 
 
             # Metrics tracking and plotting (conditional logic needed)

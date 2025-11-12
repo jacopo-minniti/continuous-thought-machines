@@ -87,6 +87,7 @@ def parse_args():
     parser.add_argument('--gate_gamma', type=float, default=0.2, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
     parser.add_argument('--gate_margin', type=float, default=0.02, help='Margin when comparing ingest vs reflect CE (CTM only).')
+    parser.add_argument('--pg_log_every', type=int, default=0, help='Log PG diagnostics every N iterations (0=disable).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=4, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -543,6 +544,21 @@ if __name__=='__main__':
                 pbar_desc = f'Timing; d={(time_end_data-time_start_data):0.3f}, f={(time_end_forward-time_start_forward):0.3f}, b={(time_end_backward-time_start_backward):0.3f}. Loss(avg)={loss_log.item():.3f} Acc(loc)={accuracy_local:.3f} LR={current_lr:.6f}'
 
              pbar.set_description(f'{args.model.upper()} {pbar_desc}')
+
+             if args.model == 'ctm' and args.pg_log_every > 0 and bi % args.pg_log_every == 0:
+                 pg_metrics = base_model.get_gate_metrics() or {}
+                 def fmt_pg(key):
+                     value = pg_metrics.get(key)
+                     return f"{value:.3f}" if value is not None else "nan"
+                 pg_msg = (
+                     f"[PG iter {bi}] "
+                     f"mean_r={fmt_pg('mean_gate_value')} "
+                     f"open_frac={fmt_pg('probe_open_frac')} "
+                     f"ce_ing={fmt_pg('gate_ce_ing')} "
+                     f"ce_ref={fmt_pg('gate_ce_ref')} "
+                     f"gate_bce={fmt_pg('gate_bce')}"
+                 )
+                 pbar.write(pg_msg)
         # --- End Aggregation and Logging ---
 
 

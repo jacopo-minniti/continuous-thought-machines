@@ -559,7 +559,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         loss_fn = self._gate_loss_fn
         targets = self._gate_targets
         if loss_fn is None or targets is None or idx.numel() == 0:
-            return None, None
+            return None, None, None, None
 
         with torch.no_grad():
             logits_ing = self._one_step_logits(
@@ -586,8 +586,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             ones = torch.ones(zero_one_shape, device=logits_ing.device, dtype=logits_ing.dtype)
             r_star = torch.where(better_ing.unsqueeze(-1), zeros, ones)
             open_frac = better_ing.float().mean().item()
+            ce_ing_mean = ce_ing.mean().item()
+            ce_ref_mean = ce_ref.mean().item()
 
-        return r_star, open_frac
+        return r_star, open_frac, ce_ing_mean, ce_ref_mean
 
     def _one_step_logits(
         self,
@@ -644,6 +646,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         gate_probe_open_sum = 0.0
         gate_probe_count = 0
         gate_history = []
+        gate_ce_ing_sum = 0.0
+        gate_ce_ref_sum = 0.0
+        gate_ce_measurements = 0
 
         gate_supervision_active = (
             self.training
@@ -722,7 +727,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             if gate_supervision_active and (stepi % self.probe_every == 0) and gate_logits is not None:
                 probe_idx = torch.arange(B, device=device)
                 if probe_idx.numel() > 0:
-                    r_star, open_frac = self._compute_gate_target(
+                    r_star, open_frac, ce_ing_mean, ce_ref_mean = self._compute_gate_target(
                         prev_activated_state,
                         o_t,
                         state_trace_prev,
@@ -736,6 +741,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                         gate_losses.append(gate_loss)
                         gate_probe_count += 1
                         gate_probe_open_sum += open_frac
+                        gate_ce_ing_sum += ce_ing_mean
+                        gate_ce_ref_sum += ce_ref_mean
+                        gate_ce_measurements += 1
                         gate_predictions = (torch.sigmoid(gate_logits[probe_idx].detach()) >= 0.5).float()
                         gate_probe_accuracy_sum += (gate_predictions == r_star).float().mean().item()
 
@@ -769,6 +777,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 'probe_accuracy': (gate_probe_accuracy_sum / gate_probe_count) if gate_probe_count else None,
                 'probe_open_frac': (gate_probe_open_sum / gate_probe_count) if gate_probe_count else None,
             }
+            if gate_ce_measurements:
+                self.latest_gate_metrics['gate_ce_ing'] = gate_ce_ing_sum / gate_ce_measurements
+                self.latest_gate_metrics['gate_ce_ref'] = gate_ce_ref_sum / gate_ce_measurements
         else:
             self.latest_gate_metrics = {}
 
@@ -776,6 +787,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             self.latest_gate_sequence = torch.stack(gate_history, dim=-1)
         else:
             self.latest_gate_sequence = None
+
+        if self.latest_gate_loss is not None:
+            if self.latest_gate_metrics is None:
+                self.latest_gate_metrics = {}
+            self.latest_gate_metrics['gate_bce'] = self.latest_gate_loss.item()
 
         self._gate_targets = None
         self._gate_loss_fn = None
