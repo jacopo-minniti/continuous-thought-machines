@@ -102,6 +102,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  gamma=0.25,
                  probe_every=4,
                  gate_margin=0.02,
+                 probe_steps=1,
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -122,6 +123,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.gamma = float(gamma)
         self.probe_every = int(probe_every) if probe_every is not None else 0
         self.gate_margin = float(gate_margin)
+        self.probe_steps = max(1, int(probe_steps))
         self.latest_gate_loss = None
         self.latest_gate_metrics = {}
         self.latest_gate_sequence = None
@@ -562,19 +564,32 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             return None, None, None, None
 
         with torch.no_grad():
-            logits_ing = self._one_step_logits(
-                o_t[idx],
-                state_trace_prev[idx],
-                None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx],
-                None if decay_beta_out_prev is None else decay_beta_out_prev[idx],
-                r_out[idx],
+            idx_slice = idx
+            state_trace_slice = state_trace_prev[idx_slice].clone()
+            decay_alpha_slice = None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx_slice].clone()
+            decay_beta_slice = None if decay_beta_out_prev is None else decay_beta_out_prev[idx_slice].clone()
+            r_out_slice = r_out[idx_slice]
+
+            logits_ing = self._forced_branch_logits(
+                forced_input=o_t[idx_slice],
+                initial_activated=prev_activated_state[idx_slice],
+                state_trace_prev_slice=state_trace_slice,
+                decay_alpha_out_prev_slice=decay_alpha_slice,
+                decay_beta_out_prev_slice=decay_beta_slice,
+                r_out_slice=r_out_slice,
+                steps=self.probe_steps,
+                mode="ingest",
             )
-            logits_ref = self._one_step_logits(
-                prev_activated_state[idx],
-                state_trace_prev[idx],
-                None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx],
-                None if decay_beta_out_prev is None else decay_beta_out_prev[idx],
-                r_out[idx],
+
+            logits_ref = self._forced_branch_logits(
+                forced_input=None,
+                initial_activated=prev_activated_state[idx_slice],
+                state_trace_prev_slice=state_trace_prev[idx_slice].clone(),
+                decay_alpha_out_prev_slice=None if decay_alpha_out_prev is None else decay_alpha_out_prev[idx_slice].clone(),
+                decay_beta_out_prev_slice=None if decay_beta_out_prev is None else decay_beta_out_prev[idx_slice].clone(),
+                r_out_slice=r_out_slice,
+                steps=self.probe_steps,
+                mode="reflect",
             )
 
             ce_ing = loss_fn(logits_ing, targets[idx])
@@ -591,19 +606,34 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
         return r_star, open_frac, ce_ing_mean, ce_ref_mean
 
-    def _one_step_logits(
+    def _forced_branch_logits(
         self,
-        synapse_input,
+        forced_input,
+        initial_activated,
         state_trace_prev_slice,
         decay_alpha_out_prev_slice,
         decay_beta_out_prev_slice,
         r_out_slice,
+        steps,
+        mode,
     ):
-        state = self.synapses(synapse_input)
-        state_trace_next = torch.cat((state_trace_prev_slice[:, :, 1:], state.unsqueeze(-1)), dim=-1)
-        activation = self.trace_processor(state_trace_next)
+        state_trace = state_trace_prev_slice.clone()
+        activated_state = initial_activated.clone()
+
+        for _ in range(steps):
+            if mode == "reflect":
+                synapse_input = activated_state
+            elif mode == "ingest":
+                synapse_input = forced_input
+            else:
+                raise ValueError(f"Invalid mode {mode}")
+
+            state = self.synapses(synapse_input)
+            state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
+            activated_state = self.trace_processor(state_trace)
+
         synch_out, _, _ = self.compute_synchronisation(
-            activation,
+            activated_state,
             decay_alpha_out_prev_slice,
             decay_beta_out_prev_slice,
             r_out_slice,

@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument("--gate_gamma", type=float, default=0.0)
     parser.add_argument("--probe_every", type=int, default=0)
     parser.add_argument("--gate_margin", type=float, default=0.02)
+    parser.add_argument("--gate_probe_steps", type=int, default=1)
 
     return parser.parse_args()
 
@@ -71,6 +72,7 @@ def load_model(args, out_dims):
         gamma=args.gate_gamma,
         probe_every=args.probe_every,
         gate_margin=args.gate_margin,
+        probe_steps=args.gate_probe_steps,
     )
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)

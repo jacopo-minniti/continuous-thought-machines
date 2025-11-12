@@ -28,6 +28,7 @@ def prepare_model(prediction_reshaper, args, device):
             gamma=args.gate_gamma,
             probe_every=args.probe_every,
             gate_margin=args.gate_margin,
+            probe_steps=args.gate_probe_steps,
         ).to(device)
     elif args.model_type == 'lstm':
         model = LSTMBaseline(

@@ -86,6 +86,7 @@ def parse_args():
     parser.add_argument('--gate_gamma', type=float, default=0.25, help='Weight for perceptual gate supervision (CTM only).')
     parser.add_argument('--probe_every', type=int, default=4, help='Ticks between counterfactual probes (CTM only).')
     parser.add_argument('--gate_margin', type=float, default=0.02, help='Margin when comparing ingest vs reflect task loss (CTM only).')
+    parser.add_argument('--gate_probe_steps', type=int, default=1, help='Number of forced steps when computing gate labels (CTM only).')
     parser.add_argument('--memory_length', type=int, default=25, help='Length of the pre-activation history for NLMS (CTM only).')
     parser.add_argument('--deep_memory', action=argparse.BooleanOptionalAction, default=True, help='Use deep memory (CTM only).')
     parser.add_argument('--memory_hidden_dims', type=int, default=32, help='Hidden dimensions of the memory if using deep memory (CTM only).')
@@ -232,6 +233,7 @@ if __name__=='__main__':
             gamma=args.gate_gamma,
             probe_every=args.probe_every,
             gate_margin=args.gate_margin,
+            probe_steps=args.gate_probe_steps,
         ).to(device)
     elif args.model == 'lstm':
         model_base = LSTMBaseline(
