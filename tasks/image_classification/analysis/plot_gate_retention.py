@@ -81,10 +81,7 @@ def load_model(args, out_dims):
 
 def aggregate_gate_stats(model, dataloader, device, max_batches):
     model.eval()
-    total = None
-    total_sq = None
-    count = 0
-    iterations = model.iterations
+    gate_values = []
 
     with torch.no_grad():
         for batch_idx, (inputs, _) in enumerate(dataloader):
@@ -96,22 +93,21 @@ def aggregate_gate_stats(model, dataloader, device, max_batches):
             if gate_seq is None:
                 continue
             gate_seq = gate_seq.squeeze(1).detach().cpu()  # Shape: [B, T]
-            if total is None:
-                total = torch.zeros(iterations, dtype=torch.float64)
-                total_sq = torch.zeros(iterations, dtype=torch.float64)
-            total += gate_seq.sum(dim=0).to(total.dtype)
-            total_sq += (gate_seq ** 2).sum(dim=0).to(total_sq.dtype)
-            count += gate_seq.size(0)
+            gate_values.append(gate_seq)
 
-    if count == 0 or total is None:
+    if not gate_values:
         raise RuntimeError("No gate values were collected. Ensure the model has a gate head.")
 
-    mean = total / count
-    variance = (total_sq / count) - mean ** 2
-    variance = torch.clamp(variance, min=1e-8)
-    stderr = torch.sqrt(variance / count)
-    ci95 = 1.96 * stderr
-    return mean, ci95
+    all_values = torch.cat(gate_values, dim=0).to(torch.float64)  # [N, T]
+    stats = {
+        "mean": all_values.mean(dim=0),
+        "p10": torch.quantile(all_values, 0.10, dim=0),
+        "p25": torch.quantile(all_values, 0.25, dim=0),
+        "p50": torch.quantile(all_values, 0.50, dim=0),
+        "p75": torch.quantile(all_values, 0.75, dim=0),
+        "p90": torch.quantile(all_values, 0.90, dim=0),
+    }
+    return stats
 
 
 def main():
@@ -131,18 +127,27 @@ def main():
         pin_memory=(device.type == "cuda"),
     )
 
-    mean, ci = aggregate_gate_stats(model, dataloader, device, args.num_batches)
+    stats = aggregate_gate_stats(model, dataloader, device, args.num_batches)
 
-    ticks = torch.arange(1, len(mean) + 1)
+    ticks = torch.arange(1, len(stats["mean"]) + 1)
     plt.figure(figsize=(10, 5))
-    plt.plot(ticks, mean, label="Mean r_t", color="tab:blue")
+    plt.plot(ticks, stats["p50"], label="Median r_t", color="tab:blue", linewidth=2)
+    plt.plot(ticks, stats["mean"], label="Mean r_t", color="tab:blue", linestyle="--", linewidth=1.5)
     plt.fill_between(
         ticks,
-        mean - ci,
-        mean + ci,
+        stats["p25"],
+        stats["p75"],
         color="tab:blue",
-        alpha=0.2,
-        label="95% CI",
+        alpha=0.25,
+        label="25th-75th percentile",
+    )
+    plt.fill_between(
+        ticks,
+        stats["p10"],
+        stats["p90"],
+        color="tab:blue",
+        alpha=0.15,
+        label="10th-90th percentile",
     )
     plt.xlabel("Tick (t)")
     plt.ylabel("Retention gate r_t")
