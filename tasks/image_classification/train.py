@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 
@@ -54,6 +55,99 @@ warnings.filterwarnings(
     r"^PIL\.TiffImagePlugin$" # Using a regular expression to match the module.
 )
 
+
+def compute_grad_norm(parameters):
+    total = 0.0
+    for p in parameters:
+        if p.grad is None:
+            continue
+        param_norm = p.grad.data.norm(2).item()
+        total += param_norm * param_norm
+    return math.sqrt(total) if total > 0 else 0.0
+
+def get_ctm_grad_metrics(model):
+    gate_norm = compute_grad_norm(list(model.perceptual_gate.parameters())) if getattr(model, 'perceptual_gate', None) else 0.0
+    qproj_norm = compute_grad_norm(list(model.q_proj.parameters())) if getattr(model, 'q_proj', None) else 0.0
+    synapse_norm = compute_grad_norm(list(model.synapses.parameters())) if getattr(model, 'synapses', None) else 0.0
+    return {'gate': gate_norm, 'q_proj': qproj_norm, 'synapse': synapse_norm}
+
+def init_retention_tracker(iterations, device):
+    zeros = torch.zeros(iterations, device=device)
+    return {
+        'sample_count': torch.tensor(0.0, device=device),
+        'sum_r': zeros.clone(),
+        'sum_loss': zeros.clone(),
+        'sum_r2': zeros.clone(),
+        'sum_loss2': zeros.clone(),
+        'sum_rloss': zeros.clone(),
+        'sum_cert': zeros.clone(),
+        'sum_cert2': zeros.clone(),
+        'sum_rcert': zeros.clone(),
+    }
+
+def update_retention_tracker(tracker, retentions, per_tick_losses, certainties):
+    tracker['sample_count'] += retentions.shape[0]
+    tracker['sum_r'] += retentions.sum(dim=0)
+    tracker['sum_loss'] += per_tick_losses.sum(dim=0)
+    tracker['sum_r2'] += (retentions ** 2).sum(dim=0)
+    tracker['sum_loss2'] += (per_tick_losses ** 2).sum(dim=0)
+    tracker['sum_rloss'] += (retentions * per_tick_losses).sum(dim=0)
+    tracker['sum_cert'] += certainties.sum(dim=0)
+    tracker['sum_cert2'] += (certainties ** 2).sum(dim=0)
+    tracker['sum_rcert'] += (retentions * certainties).sum(dim=0)
+
+def finalize_tracker(tracker):
+    eps = 1e-8
+    count = tracker['sample_count'].clamp_min(1.0)
+    mean_r = tracker['sum_r'] / count
+    mean_loss = tracker['sum_loss'] / count
+    mean_cert = tracker['sum_cert'] / count
+    var_r = tracker['sum_r2'] / count - mean_r ** 2
+    var_loss = tracker['sum_loss2'] / count - mean_loss ** 2
+    var_cert = tracker['sum_cert2'] / count - mean_cert ** 2
+    cov_loss = tracker['sum_rloss'] / count - mean_r * mean_loss
+    cov_cert = tracker['sum_rcert'] / count - mean_r * mean_cert
+    corr_loss = cov_loss / (torch.sqrt(var_r.clamp_min(0.0) * var_loss.clamp_min(0.0)) + eps)
+    corr_cert = cov_cert / (torch.sqrt(var_r.clamp_min(0.0) * var_cert.clamp_min(0.0)) + eps)
+    return {
+        'corr_loss': corr_loss.detach().cpu(),
+        'corr_cert': corr_cert.detach().cpu(),
+        'mean_r': mean_r.detach().cpu(),
+        'mean_loss': mean_loss.detach().cpu(),
+        'mean_cert': mean_cert.detach().cpu(),
+    }
+
+def plot_grad_history(history, path):
+    if len(history['iter']) < 2:
+        return
+    plt.figure(figsize=(8, 4), dpi=200)
+    plt.plot(history['iter'], history['gate'], label='Gate Grad Norm')
+    plt.plot(history['iter'], history['q_proj'], label='Q-Proj Grad Norm')
+    plt.plot(history['iter'], history['synapse'], label='Synapse Grad Norm')
+    plt.xlabel('Iteration')
+    plt.ylabel('Grad Norm')
+    plt.title('Key Gradient Norms')
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+def plot_retention_correlation(corr_data, path_prefix):
+    if corr_data is None:
+        return
+    ticks = np.arange(corr_data['corr_loss'].shape[0])
+    plt.figure(figsize=(8, 4), dpi=200)
+    plt.plot(ticks, corr_data['corr_loss'].numpy(), label='corr($r_t$, loss_t)')
+    plt.plot(ticks, corr_data['corr_cert'].numpy(), label='corr($r_t$, certainty_t)')
+    plt.xlabel('Tick ($t$)')
+    plt.ylabel('Correlation')
+    plt.title('Retention Correlations')
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f'{path_prefix}.png')
+    plt.close()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -120,6 +214,7 @@ def parse_args():
     parser.add_argument('--n_test_batches', type=int, default=20, help='How many minibatches to approx metrics. Set to -1 for full eval')
     parser.add_argument('--device', type=int, nargs='+', default=[-1], help='List of GPU(s) to use. Set to -1 to use CPU.')
     parser.add_argument('--use_amp', action=argparse.BooleanOptionalAction, default=False, help='AMP autocast.')
+    parser.add_argument('--log_stride', type=int, default=5, help='Stride for logging retention correlations.')
 
 
     args = parser.parse_args()
@@ -384,6 +479,8 @@ if __name__=='__main__':
 
     # Training
     iterator = iter(trainloader)
+    grad_history = {'iter': [], 'gate': [], 'q_proj': [], 'synapse': []}
+    last_grad_metrics = None
 
 
     with tqdm(total=args.training_iterations, initial=start_iter, leave=False, position=0, dynamic_ncols=True) as pbar:
@@ -435,10 +532,17 @@ if __name__=='__main__':
                     pbar_desc = f'FF Loss={loss.item():0.3f}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}'
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
 
             if args.gradient_clipping!=-1:
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.gradient_clipping)
+            if args.model == 'ctm':
+                grad_metrics = get_ctm_grad_metrics(model)
+                grad_history['iter'].append(bi)
+                grad_history['gate'].append(grad_metrics['gate'])
+                grad_history['q_proj'].append(grad_metrics['q_proj'])
+                grad_history['synapse'].append(grad_metrics['synapse'])
+                last_grad_metrics = grad_metrics
 
             scaler.step(optimizer)
             scaler.update()
@@ -458,6 +562,9 @@ if __name__=='__main__':
                 current_test_accuracies = [] # Holds list of accuracies per tick for CTM/LSTM, single value for FF
                 current_train_accuracies_most_certain = [] # Only for CTM/LSTM
                 current_test_accuracies_most_certain = [] # Only for CTM/LSTM
+                corr_loss_fn = nn.CrossEntropyLoss(reduction='none') if args.model == 'ctm' else None
+                train_corr_tracker = init_retention_tracker(model.iterations, device) if args.model == 'ctm' else None
+                test_corr_tracker = init_retention_tracker(model.iterations, device) if args.model == 'ctm' else None
 
 
                 # Reset BN stats using train mode
@@ -496,6 +603,15 @@ if __name__=='__main__':
                                 )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy()) # Shape (B, T)
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy()) # Shape (B,)
+                                if train_corr_tracker is not None and retentions is not None:
+                                    targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), these_predictions.size(-1), -1)
+                                    per_tick_losses = corr_loss_fn(these_predictions, targets_expanded)
+                                    update_retention_tracker(
+                                        train_corr_tracker,
+                                        retentions.detach(),
+                                        per_tick_losses.detach(),
+                                        certainties[:, 1, :].detach()
+                                    )
 
                             elif args.model == 'lstm':
                                 these_predictions, certainties, _ = model(inputs)
@@ -564,6 +680,15 @@ if __name__=='__main__':
                                 )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy())
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy())
+                                if test_corr_tracker is not None and retentions is not None:
+                                    targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), these_predictions.size(-1), -1)
+                                    per_tick_losses = corr_loss_fn(these_predictions, targets_expanded)
+                                    update_retention_tracker(
+                                        test_corr_tracker,
+                                        retentions.detach(),
+                                        per_tick_losses.detach(),
+                                        certainties[:, 1, :].detach()
+                                    )
 
                             elif args.model == 'lstm':
                                 these_predictions, certainties, _ = model(inputs)
@@ -595,6 +720,27 @@ if __name__=='__main__':
                     else: # FF
                          current_test_accuracies = (all_targets == all_predictions).mean()
                          test_accuracies.append(current_test_accuracies)
+
+                if args.model == 'ctm':
+                    stride = max(1, args.log_stride)
+                    if train_corr_tracker is not None:
+                        train_corr_data = finalize_tracker(train_corr_tracker)
+                        print('\n[Retention Correlation - Train]')
+                        for tick in range(0, model.iterations, stride):
+                            print(f'tick {tick:02d}: corr(loss)={train_corr_data["corr_loss"][tick]:.3f}, '
+                                  f'corr(cert)={train_corr_data["corr_cert"][tick]:.3f}')
+                        plot_retention_correlation(train_corr_data, os.path.join(args.log_dir, f'retention_corr_train_iter{bi}'))
+                    if test_corr_tracker is not None:
+                        test_corr_data = finalize_tracker(test_corr_tracker)
+                        print('\n[Retention Correlation - Test]')
+                        for tick in range(0, model.iterations, stride):
+                            print(f'tick {tick:02d}: corr(loss)={test_corr_data["corr_loss"][tick]:.3f}, '
+                                  f'corr(cert)={test_corr_data["corr_cert"][tick]:.3f}')
+                        plot_retention_correlation(test_corr_data, os.path.join(args.log_dir, f'retention_corr_test_iter{bi}'))
+                    if last_grad_metrics is not None:
+                        print(f"Latest grad norms -> gate: {last_grad_metrics['gate']:.4f}, "
+                              f"q_proj: {last_grad_metrics['q_proj']:.4f}, synapse: {last_grad_metrics['synapse']:.4f}")
+                        plot_grad_history(grad_history, os.path.join(args.log_dir, 'grad_norms.png'))
 
                 # Plotting (conditional)
                 figacc = plt.figure(figsize=(10, 10))
