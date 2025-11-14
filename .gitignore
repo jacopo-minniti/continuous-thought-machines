@@ -23,3 +23,6 @@ examples/*
 !examples/goldfish.jpg
 checkpoints
 utils/hugging_face/
+jobs
+.cache
+.venv
