@@ -126,7 +126,7 @@ def plot_retention_curve(stats, plot_path):
     plt.xlabel('Tick ($t$)')
     plt.ylabel(r'$r_t$')
     plt.title('Per-tick Retention Statistics')
-    plt.ylim(0.0, 1.0)
+    # plt.ylim(0.0, 1.0)
     plt.grid(True, linestyle='--', alpha=0.4)
     plt.legend()
     plt.tight_layout()
