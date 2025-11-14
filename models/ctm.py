@@ -127,6 +127,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.kv_proj = nn.Sequential(nn.LazyLinear(self.d_input), nn.LayerNorm(self.d_input)) if heads else None
         self.q_proj = nn.LazyLinear(self.d_input) if heads else None
         self.attention = nn.MultiheadAttention(self.d_input, heads, dropout, batch_first=True) if heads else None
+        self.observation_projection = nn.Linear(self.d_input, self.d_model) if self.d_input and self.d_model else None
         
         # --- Core CTM Modules ---
         self.synapses = self.get_synapses(synapse_depth, d_model, dropout)
@@ -140,6 +141,17 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.neuron_select_type_out, self.neuron_select_type_action = self.get_neuron_select_type()
         self.synch_representation_size_action = self.calculate_synch_representation_size(self.n_synch_action)
         self.synch_representation_size_out = self.calculate_synch_representation_size(self.n_synch_out)
+
+        self.perceptual_gate = None
+        if self.synch_representation_size_action:
+            gate_hidden_dim = min(256, max(32, self.synch_representation_size_action))
+            self.perceptual_gate = nn.Sequential(
+                nn.LayerNorm(self.synch_representation_size_action),
+                nn.Linear(self.synch_representation_size_action, gate_hidden_dim),
+                nn.GELU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
+        self.latest_retention = None
         
         for synch_type, size in (('action', self.synch_representation_size_action), ('out', self.synch_representation_size_out)):
             print(f"Synch representation size {synch_type}: {size}")
@@ -290,6 +302,22 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         ne = compute_normalized_entropy(reshaped_pred)
         current_certainty = torch.stack((ne, 1-ne), -1)
         return current_certainty
+
+    def project_observation(self, observation):
+        """
+        Project any external observation (attention readout, embeddings, etc.) to the model dimension.
+        """
+        if self.observation_projection is None:
+            return observation
+        return self.observation_projection(observation)
+
+    def compute_retention(self, synchronisation_action):
+        """
+        Compute the scalar perceptual gate given the action synchrony vector.
+        """
+        if self.perceptual_gate is None:
+            return torch.ones(synchronisation_action.size(0), 1, device=synchronisation_action.device, dtype=synchronisation_action.dtype)
+        return torch.sigmoid(self.perceptual_gate(synchronisation_action))
 
     # --- Setup Methods ---
 
@@ -534,6 +562,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         synch_out_tracking = []
         synch_action_tracking = []
         attention_tracking = []
+        retention_tracking = []
 
         # --- Featurise Input Data ---
         kv = self.compute_features(x)
@@ -545,6 +574,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         # --- Prepare Storage for Outputs per Iteration ---
         predictions = torch.empty(B, self.out_dims, self.iterations, device=device, dtype=torch.float32)
         certainties = torch.empty(B, 2, self.iterations, device=device, dtype=torch.float32)
+        retentions = torch.empty(B, self.iterations, device=device, dtype=activated_state.dtype)
 
         # --- Initialise Recurrent Synch Values  ---
         decay_alpha_action, decay_beta_action = None, None
@@ -562,14 +592,22 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
 
+            retention = self.compute_retention(synchronisation_action)
+            retentions[:, stepi] = retention.squeeze(-1)
+
             # --- Interact with Data via Attention ---
-            q = self.q_proj(synchronisation_action).unsqueeze(1)
-            attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
-            attn_out = attn_out.squeeze(1)
-            pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+            attn_weights = None
+            attn_read = activated_state
+            if self.attention is not None:
+                q = self.q_proj(synchronisation_action).unsqueeze(1)
+                attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
+                attn_out = attn_out.squeeze(1)
+                attn_read = self.project_observation(attn_out)
+
+            synapse_input = retention * activated_state + (1 - retention) * attn_read
 
             # --- Apply Synapses ---
-            state = self.synapses(pre_synapse_input)
+            state = self.synapses(synapse_input)
             # The 'state_trace' is the history of incoming pre-activations
             state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
 
@@ -596,9 +634,11 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 attention_tracking.append(attn_weights.detach().cpu().numpy())
                 synch_out_tracking.append(synchronisation_out.detach().cpu().numpy())
                 synch_action_tracking.append(synchronisation_action.detach().cpu().numpy())
+                retention_tracking.append(retention.detach().cpu().numpy())
+
+        self.latest_retention = retentions
 
         # --- Return Values ---
         if track:
-            return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
+            return predictions, certainties, (np.array(synch_out_tracking), np.array(synch_action_tracking), np.array(retention_tracking)), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
         return predictions, certainties, synchronisation_out
-

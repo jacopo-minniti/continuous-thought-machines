@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -55,7 +56,13 @@ def sort_loss(predictions, targets):
     loss = compute_ctc_loss(predictions, targets, blank_label=predictions.shape[1]-1)
     return loss
 
-def image_classification_loss(predictions, certainties, targets, use_most_certain=True):
+def image_classification_loss(predictions,
+                              certainties,
+                              targets,
+                              use_most_certain=True,
+                              retentions=None,
+                              dwell_start_frac=0.33,
+                              lambda_mono=0.01):
     """
     Computes the maze loss with auto-extending cirriculum.
 
@@ -65,22 +72,51 @@ def image_classification_loss(predictions, certainties, targets, use_most_certai
     Targets are of shape: [B]
 
     use_most_certain will select either the most certain point or the final point. 
+    If retentions is provided, a third dwell tick (highest retention after warmup) is included
+    and a monotonicity regulariser over r_t is added.
     """
     targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), predictions.size(-1), -1)
     # Losses are of shape [B, internal_ticks]
     losses = nn.CrossEntropyLoss(reduction='none')(predictions, targets_expanded)
-        
-    loss_index_1 = losses.argmin(dim=1)
-    loss_index_2 = certainties[:,1].argmax(-1)
-    if not use_most_certain:  # Revert to final loss if set
-        loss_index_2[:] = -1
-    
-    batch_indexer = torch.arange(predictions.size(0), device=predictions.device)
-    loss_minimum_ce = losses[batch_indexer, loss_index_1].mean()
-    loss_selected = losses[batch_indexer, loss_index_2].mean()
+    T = predictions.size(-1)
+    batch_size = predictions.size(0)
 
-    loss = (loss_minimum_ce + loss_selected)/2
-    return loss, loss_index_2
+    loss_index_1 = losses.argmin(dim=1)
+    certainty_indices = certainties[:, 1].argmax(-1)
+    if use_most_certain:
+        where_most_certain = certainty_indices
+        loss_index_2 = certainty_indices
+    else:
+        where_most_certain = torch.full_like(certainty_indices, -1)
+        loss_index_2 = torch.full_like(certainty_indices, T - 1)
+
+    tick_indices = [loss_index_1, loss_index_2]
+
+    dwell_index = None
+    if retentions is not None:
+        dwell_start_frac = float(dwell_start_frac)
+        dwell_start = int(math.floor(dwell_start_frac * T))
+        dwell_start = max(0, min(T - 1, dwell_start))
+        dwell_region = retentions[:, dwell_start:]
+        dwell_region = dwell_region if dwell_region.numel() else retentions[:, -1:]
+        dwell_relative = dwell_region.argmax(dim=1)
+        dwell_index = dwell_relative + dwell_start
+        tick_indices.append(dwell_index)
+
+    tick_stack = torch.stack(tick_indices, dim=1)
+    selection_mask = losses.new_zeros(batch_size, T)
+    batch_indexer = torch.arange(batch_size, device=predictions.device).unsqueeze(1).expand_as(tick_stack)
+    selection_mask[batch_indexer, tick_stack] = 1.0
+    selection_counts = selection_mask.sum(dim=1).clamp_min(1.0)
+    task_loss = ((losses * selection_mask).sum(dim=1) / selection_counts).mean()
+
+    mono_loss = torch.tensor(0.0, device=predictions.device, dtype=losses.dtype)
+    if retentions is not None and lambda_mono:
+        diffs = torch.relu(retentions[:, :-1] - retentions[:, 1:])
+        mono_loss = diffs.sum(dim=1).mean()
+        task_loss = task_loss + lambda_mono * mono_loss
+
+    return task_loss, where_most_certain
 
 def maze_loss(predictions, certainties, targets, cirriculum_lookahead=5, use_most_certain=True):
     """

@@ -102,6 +102,8 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay factor.')
     parser.add_argument('--weight_decay_exclusion_list', type=str, nargs='+', default=[], help='List to exclude from weight decay. Typically good: bn, ln, bias, start')
     parser.add_argument('--gradient_clipping', type=float, default=-1, help='Gradient quantile clipping value (-1 to disable).')
+    parser.add_argument('--dwell_start_frac', type=float, default=0.33, help='Fraction of ticks to skip before selecting the dwell tick (CTM only).')
+    parser.add_argument('--lambda_mono', type=float, default=0.01, help='Weight for the monotonic retention regularizer (CTM only).')
     parser.add_argument('--do_compile', action=argparse.BooleanOptionalAction, default=False, help='Try to compile model components (backbone, synapses if CTM).')
     parser.add_argument('--num_workers_train', type=int, default=1, help='Num workers training.')
 
@@ -406,7 +408,16 @@ if __name__=='__main__':
 
                 if args.model == 'ctm':
                     predictions, certainties, synchronisation = model(inputs)
-                    loss, where_most_certain = image_classification_loss(predictions, certainties, targets, use_most_certain=True)
+                    retentions = getattr(model, 'latest_retention', None)
+                    loss, where_most_certain = image_classification_loss(
+                        predictions,
+                        certainties,
+                        targets,
+                        use_most_certain=True,
+                        retentions=retentions,
+                        dwell_start_frac=args.dwell_start_frac,
+                        lambda_mono=args.lambda_mono,
+                    )
                     accuracy = (predictions.argmax(1)[torch.arange(predictions.size(0), device=predictions.device),where_most_certain] == targets).float().mean().item()
                     pbar_desc = f'CTM Loss={loss.item():0.3f}. Acc={accuracy:0.3f}. LR={current_lr:0.6f}. Where_certain={where_most_certain.float().mean().item():0.2f}+-{where_most_certain.float().std().item():0.2f} ({where_most_certain.min().item():d}<->{where_most_certain.max().item():d})'
 
@@ -473,7 +484,16 @@ if __name__=='__main__':
                             # Model-specific forward and loss for evaluation
                             if args.model == 'ctm':
                                 these_predictions, certainties, _ = model(inputs)
-                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, use_most_certain=True)
+                                retentions = getattr(model, 'latest_retention', None)
+                                loss, where_most_certain = image_classification_loss(
+                                    these_predictions,
+                                    certainties,
+                                    targets,
+                                    use_most_certain=True,
+                                    retentions=retentions,
+                                    dwell_start_frac=args.dwell_start_frac,
+                                    lambda_mono=args.lambda_mono,
+                                )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy()) # Shape (B, T)
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy()) # Shape (B,)
 
@@ -532,7 +552,16 @@ if __name__=='__main__':
                             # Model-specific forward and loss for evaluation
                             if args.model == 'ctm':
                                 these_predictions, certainties, _ = model(inputs)
-                                loss, where_most_certain = image_classification_loss(these_predictions, certainties, targets, use_most_certain=True)
+                                retentions = getattr(model, 'latest_retention', None)
+                                loss, where_most_certain = image_classification_loss(
+                                    these_predictions,
+                                    certainties,
+                                    targets,
+                                    use_most_certain=True,
+                                    retentions=retentions,
+                                    dwell_start_frac=args.dwell_start_frac,
+                                    lambda_mono=args.lambda_mono,
+                                )
                                 all_predictions_list.append(these_predictions.argmax(1).detach().cpu().numpy())
                                 all_predictions_most_certain_list.append(these_predictions.argmax(1)[torch.arange(these_predictions.size(0), device=these_predictions.device), where_most_certain].detach().cpu().numpy())
 

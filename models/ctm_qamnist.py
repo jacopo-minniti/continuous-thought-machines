@@ -144,6 +144,7 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
         # --- Storage for outputs per iteration ---
         predictions = torch.empty(B, self.out_dims, total_iterations, device=device, dtype=x.dtype)
         certainties = torch.empty(B, 2, total_iterations, device=device, dtype=x.dtype)
+        retentions = torch.empty(B, total_iterations, device=device, dtype=activated_state.dtype)
 
         # --- Initialise Recurrent Synch Values  ---
         decay_alpha_action, decay_beta_action = None, None
@@ -164,6 +165,8 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
             prev_kv = kv
 
             synchronization_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
+            retention = self.compute_retention(synchronization_action)
+            retentions[:, stepi] = retention.squeeze(-1)
 
             # --- Interact with Data via Attention ---
             attn_weights = None
@@ -171,13 +174,15 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
                 q = self.q_proj(synchronization_action).unsqueeze(1)
                 attn_out, attn_weights = self.attention(q, kv, kv, average_attn_weights=False, need_weights=True)
                 attn_out = attn_out.squeeze(1)
-                pre_synapse_input = torch.concatenate((attn_out, activated_state), dim=-1)
+                observation = self.project_observation(attn_out)
             else:
-                kv = kv.squeeze(1)
-                pre_synapse_input = torch.concatenate((kv, activated_state), dim=-1)
+                kv_vec = kv.squeeze(1) if kv.dim() == 3 else kv
+                observation = self.project_observation(kv_vec)
+
+            synapse_input = retention * activated_state + (1 - retention) * observation
 
             # --- Apply Synapses ---
-            state = self.synapses(pre_synapse_input)
+            state = self.synapses(synapse_input)
             state_trace = torch.cat((state_trace[:, :, 1:], state.unsqueeze(-1)), dim=-1)
 
             # --- Apply NLMs ---
@@ -203,6 +208,8 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
                     embedding_tracking.append(kv.detach().cpu().numpy())
 
         # --- Return Values ---
+        self.latest_retention = retentions
+
         if track:
             return predictions, certainties, synchronization_out, np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking), np.array(embedding_tracking)
         return predictions, certainties, synchronization_out

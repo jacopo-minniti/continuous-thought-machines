@@ -33,7 +33,7 @@ def test_golden_parity(golden_test_model_parity, golden_test_input_parity, golde
     atol = 1e-5
     atol_attn = 1e-3
     golden_test_model_parity.eval()
-    predictions, certainties, (synch_out_tracking, synch_action_tracking), pre_activations_tracking, post_activations_tracking, attention_tracking = golden_test_model_parity(golden_test_input_parity, track=True)
+    predictions, certainties, (synch_out_tracking, synch_action_tracking, retention_tracking), pre_activations_tracking, post_activations_tracking, attention_tracking = golden_test_model_parity(golden_test_input_parity, track=True)
 
     assert torch.isclose(predictions, golden_test_expected_predictions_parity, atol=atol).all(), f"Predictions do not match expected values."
     assert torch.isclose(certainties, golden_test_expected_certainties_parity, atol=atol).all(), f"Certainties do not match expected values."
