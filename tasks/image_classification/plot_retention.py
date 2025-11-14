@@ -56,9 +56,7 @@ def collect_retention_statistics(model, loader, args, device):
     total_correct = 0
     total_seen = 0
     batches_ran = 0
-    mean_tracker = torch.zeros(model.iterations)
-    high_tracker = torch.zeros_like(mean_tracker)
-    low_tracker = torch.zeros_like(mean_tracker)
+    retention_history = []
 
     for batch_idx, (images, labels) in enumerate(loader):
         if 0 < args.max_batches <= batch_idx:
@@ -83,9 +81,7 @@ def collect_retention_statistics(model, loader, args, device):
         total_seen += labels.size(0)
         batches_ran += 1
 
-        mean_tracker += retention_tensor.mean(dim=0)
-        high_tracker += (retention_tensor > args.high_threshold).float().mean(dim=0)
-        low_tracker += (retention_tensor < args.low_threshold).float().mean(dim=0)
+        retention_history.append(retention_tensor)
 
         batch_mean = retention_tensor.mean().item()
         batch_high = (retention_tensor > args.high_threshold).float().mean().item()
@@ -98,20 +94,39 @@ def collect_retention_statistics(model, loader, args, device):
     if batches_ran == 0:
         raise RuntimeError('No batches were evaluated. Check max_batches/data configuration.')
 
-    mean_tracker /= batches_ran
-    high_tracker /= batches_ran
-    low_tracker /= batches_ran
+    all_retentions = torch.cat(retention_history, dim=0)  # (N_total, T)
+    stats = {
+        'mean': all_retentions.mean(dim=0),
+        'median': all_retentions.median(dim=0).values,
+        'p25': torch.quantile(all_retentions, 0.25, dim=0),
+        'p75': torch.quantile(all_retentions, 0.75, dim=0),
+        'p10': torch.quantile(all_retentions, 0.10, dim=0),
+        'p90': torch.quantile(all_retentions, 0.90, dim=0),
+        'high_frac': (all_retentions > args.high_threshold).float().mean(dim=0),
+        'low_frac': (all_retentions < args.low_threshold).float().mean(dim=0),
+    }
     accuracy = total_correct / max(1, total_seen)
-    return mean_tracker, high_tracker, low_tracker, accuracy
+    return stats, accuracy
 
 
-def plot_retention_curve(mean_tracker, plot_path):
-    ticks = torch.arange(mean_tracker.size(0))
-    plt.figure(figsize=(10, 4))
-    plt.plot(ticks.numpy(), mean_tracker.numpy(), label='Mean r_t')
-    plt.xlabel('Internal Tick')
-    plt.ylabel('Mean Retention')
+def plot_retention_curve(stats, plot_path):
+    ticks = torch.arange(stats['mean'].size(0)).numpy()
+    mean_np = stats['mean'].numpy()
+    median_np = stats['median'].numpy()
+    p25_np = stats['p25'].numpy()
+    p75_np = stats['p75'].numpy()
+    p10_np = stats['p10'].numpy()
+    p90_np = stats['p90'].numpy()
+
+    plt.figure(figsize=(12, 6), dpi=200)
+    plt.fill_between(ticks, p10_np, p90_np, color='tab:blue', alpha=0.15, label='10-90 percentile')
+    plt.fill_between(ticks, p25_np, p75_np, color='tab:blue', alpha=0.3, label='25-75 percentile')
+    plt.plot(ticks, mean_np, color='tab:orange', linewidth=2, label='Mean $r_t$')
+    plt.plot(ticks, median_np, color='tab:red', linestyle='--', linewidth=2, label='Median $r_t$')
+    plt.xlabel('Tick ($t$)')
+    plt.ylabel(r'$r_t$')
     plt.title('Per-tick Retention Statistics')
+    plt.ylim(0.0, 1.0)
     plt.grid(True, linestyle='--', alpha=0.4)
     plt.legend()
     plt.tight_layout()
@@ -148,22 +163,25 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'], strict=True)
     model.eval()
 
-    mean_tracker, high_tracker, low_tracker, accuracy = collect_retention_statistics(model, testloader, args, device)
+    stats, accuracy = collect_retention_statistics(model, testloader, args, device)
 
     print('\n=== Retention Summary ===')
     stride = max(1, args.log_stride)
     for tick in range(0, model.iterations, stride):
-        print(f'tick {tick:03d}: mean={mean_tracker[tick]:.3f}, '
-              f'high%={high_tracker[tick]:.3f}, low%={low_tracker[tick]:.3f}')
+        print(f'tick {tick:03d}: mean={stats["mean"][tick]:.3f}, median={stats["median"][tick]:.3f}, '
+              f'25%={stats["p25"][tick]:.3f}, 75%={stats["p75"][tick]:.3f}, '
+              f'high%={stats["high_frac"][tick]:.3f}, low%={stats["low_frac"][tick]:.3f}')
     if (model.iterations - 1) % stride != 0:
         last = model.iterations - 1
-        print(f'tick {last:03d}: mean={mean_tracker[last]:.3f}, '
-              f'high%={high_tracker[last]:.3f}, low%={low_tracker[last]:.3f}')
+        print(f'tick {last:03d}: mean={stats["mean"][last]:.3f}, median={stats["median"][last]:.3f}, '
+              f'25%={stats["p25"][last]:.3f}, 75%={stats["p75"][last]:.3f}, '
+              f'high%={stats["high_frac"][last]:.3f}, low%={stats["low_frac"][last]:.3f}')
     print(f'\nOverall accuracy ({accuracy:.4f}) across evaluated samples.')
 
-    plot_retention_curve(mean_tracker, args.plot_path)
-    print(f'Global stats -> mean r: {mean_tracker.mean():.3f}, '
-          f'avg dwell%: {high_tracker.mean():.3f}, avg evidence%: {low_tracker.mean():.3f}')
+    plot_retention_curve(stats, args.plot_path)
+    print(f'Global stats -> mean r: {stats["mean"].mean():.3f}, '
+          f'median r: {stats["median"].mean():.3f}, '
+          f'avg dwell%: {stats["high_frac"].mean():.3f}, avg evidence%: {stats["low_frac"].mean():.3f}')
 
 
 if __name__ == '__main__':
