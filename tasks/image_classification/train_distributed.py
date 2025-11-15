@@ -389,11 +389,27 @@ if __name__=='__main__':
         raise ValueError(f"Unknown model type: {args.model}")
 
     # Initialize lazy modules if any
-    try:
-        pseudo_inputs = train_data.__getitem__(0)[0].unsqueeze(0).to(device)
-        model_base(pseudo_inputs)
-    except Exception as e:
-         print(f"Warning: Pseudo forward pass failed: {e}")
+    def initialize_lazy_modules():
+        sample_tensor = None
+        try:
+            sample_tensor = train_data.__getitem__(0)[0]
+        except Exception as e:
+            if is_main_process(rank):
+                print(f"Warning: Failed to fetch sample for lazy init: {e}")
+        if isinstance(sample_tensor, torch.Tensor):
+            init_input = sample_tensor.unsqueeze(0).to(device)
+        else:
+            if is_main_process(rank):
+                print("Falling back to zero tensor for lazy init.")
+            if args.dataset == 'imagenet':
+                init_shape = (3, 224, 224)
+            else:
+                init_shape = (3, 32, 32)
+            init_input = torch.zeros((1,) + init_shape, device=device)
+        with torch.no_grad():
+            model_base(init_input)
+
+    initialize_lazy_modules()
 
     # Wrap model with DDP
     if device.type == 'cuda' and world_size > 1:
