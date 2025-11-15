@@ -565,8 +565,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         synch_action_tracking = []
         attention_tracking = []
         retention_tracking = []
-        attention_reads = torch.zeros(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
-        activated_states_record = torch.empty(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
+        attention_reads = None
+        activated_states_record = None
         retention_tracking = []
 
         # --- Featurise Input Data ---
@@ -575,6 +575,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         # --- Initialise Recurrent State ---
         state_trace = self.start_trace.unsqueeze(0).expand(B, -1, -1) # Shape: (B, H, T)
         activated_state = self.start_activated_state.unsqueeze(0).expand(B, -1) # Shape: (B, H)
+        attention_reads = torch.zeros(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
+        activated_states_record = torch.empty(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
 
         # --- Prepare Storage for Outputs per Iteration ---
         predictions = torch.empty(B, self.out_dims, self.iterations, device=device, dtype=torch.float32)
