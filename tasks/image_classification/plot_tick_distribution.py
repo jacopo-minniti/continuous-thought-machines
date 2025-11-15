@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument('--max_batches', type=int, default=0, help='Optional cap on number of test batches to evaluate (<=0 uses all).')
     parser.add_argument('--device', default='cuda:0', type=str, help='Device string, e.g. "cuda:0", "cpu", or "mps".')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of dataloader workers.')
-    parser.add_argument('--seed', type=int, default=0, help='PRNG seed for dataloader shuffling.')
+    parser.add_argument('--seed', type=int, default=1, help='PRNG seed for dataloader shuffling.')
     parser.add_argument('--output_path', type=str, default='tick_distribution.png', help='Path to save the histogram figure.')
     parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10'], help='Dataset to evaluate. Currently only CIFAR-10 is supported.')
     return parser.parse_args()
