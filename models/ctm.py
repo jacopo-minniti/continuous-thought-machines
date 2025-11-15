@@ -152,6 +152,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 nn.Linear(gate_hidden_dim, 1),
             )
         self.latest_retention = None
+        self.latest_attention_read = None
+        self.latest_activated_states = None
         
         for synch_type, size in (('action', self.synch_representation_size_action), ('out', self.synch_representation_size_out)):
             print(f"Synch representation size {synch_type}: {size}")
@@ -563,6 +565,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         synch_action_tracking = []
         attention_tracking = []
         retention_tracking = []
+        attention_reads = torch.zeros(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
+        activated_states_record = torch.empty(B, self.iterations, self.d_model, device=device, dtype=activated_state.dtype)
+        retention_tracking = []
 
         # --- Featurise Input Data ---
         kv = self.compute_features(x)
@@ -605,6 +610,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 attn_read = self.project_observation(attn_out)
 
             synapse_input = retention * activated_state + (1 - retention) * attn_read
+            attention_reads[:, stepi] = attn_read
 
             # --- Apply Synapses ---
             state = self.synapses(synapse_input)
@@ -613,6 +619,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
 
             # --- Apply Neuron-Level Models ---
             activated_state = self.trace_processor(state_trace)
+            activated_states_record[:, stepi] = activated_state
             # One would also keep an 'activated_state_trace' as the history of outgoing post-activations
             # BUT, this is unnecessary because the synchronisation calculation is fully linear and can be
             # done using only the currect activated state (see compute_synchronisation method for explanation)
@@ -637,6 +644,8 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 retention_tracking.append(retention.detach().cpu().numpy())
 
         self.latest_retention = retentions
+        self.latest_attention_read = attention_reads
+        self.latest_activated_states = activated_states_record
 
         # --- Return Values ---
         if track:

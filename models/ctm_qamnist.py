@@ -145,6 +145,8 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
         predictions = torch.empty(B, self.out_dims, total_iterations, device=device, dtype=x.dtype)
         certainties = torch.empty(B, 2, total_iterations, device=device, dtype=x.dtype)
         retentions = torch.empty(B, total_iterations, device=device, dtype=activated_state.dtype)
+        attention_reads = torch.zeros(B, total_iterations, self.d_model, device=device, dtype=activated_state.dtype)
+        activated_states_record = torch.empty(B, total_iterations, self.d_model, device=device, dtype=activated_state.dtype)
 
         # --- Initialise Recurrent Synch Values  ---
         decay_alpha_action, decay_beta_action = None, None
@@ -180,6 +182,7 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
                 observation = self.project_observation(kv_vec)
 
             synapse_input = retention * activated_state + (1 - retention) * observation
+            attention_reads[:, stepi] = observation
 
             # --- Apply Synapses ---
             state = self.synapses(synapse_input)
@@ -187,6 +190,7 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
 
             # --- Apply NLMs ---
             activated_state = self.trace_processor(state_trace)
+            activated_states_record[:, stepi] = activated_state
 
             # --- Calculate Synchronisation for Output Predictions ---
             synchronization_out, decay_alpha_out, decay_beta_out = self.compute_synchronisation(activated_state, decay_alpha_out, decay_beta_out, r_out, synch_type='out')
@@ -209,6 +213,8 @@ class ContinuousThoughtMachineQAMNIST(ContinuousThoughtMachine):
 
         # --- Return Values ---
         self.latest_retention = retentions
+        self.latest_attention_read = attention_reads
+        self.latest_activated_states = activated_states_record
 
         if track:
             return predictions, certainties, synchronization_out, np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking), np.array(embedding_tracking)

@@ -106,8 +106,9 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay factor.')
     parser.add_argument('--weight_decay_exclusion_list', type=str, nargs='+', default=[], help='List to exclude from weight decay. Typically good: bn, ln, bias, start')
     parser.add_argument('--gradient_clipping', type=float, default=-1, help='Gradient quantile clipping value (-1 to disable).')
-    parser.add_argument('--dwell_start_frac', type=float, default=0.33, help='Fraction of ticks to skip before selecting the dwell tick (CTM only).')
-    parser.add_argument('--lambda_mono', type=float, default=0.01, help='Weight for the monotonic retention regularizer (CTM only).')
+    parser.add_argument('--look_end_frac', type=float, default=0.5, help='Fraction of ticks defining the end of the exploratory window (CTM only).')
+    parser.add_argument('--dwell_start_frac', type=float, default=0.33, help='Fraction of ticks to start the dwell window (CTM only).')
+    parser.add_argument('--lambda_gate', type=float, default=0.01, help='Weight for the gate regularizer at look/dwell heads (CTM only).')
     parser.add_argument('--num_workers_train', type=int, default=1, help='Num workers training.')
     parser.add_argument('--use_custom_sampler', action=argparse.BooleanOptionalAction, default=False, help='Use custom fast sampler to avoid reshuffling.')
     parser.add_argument('--do_compile', action=argparse.BooleanOptionalAction, default=False, help='Try to compile model components.')
@@ -281,6 +282,12 @@ def plot_retention_correlation(corr_data, path_prefix):
 def get_latest_retention(model):
     base_model = model.module if isinstance(model, DDP) else model
     return getattr(base_model, 'latest_retention', None)
+def get_latest_attention_read(model):
+    base_model = model.module if isinstance(model, DDP) else model
+    return getattr(base_model, 'latest_attention_read', None)
+def get_latest_activations(model):
+    base_model = model.module if isinstance(model, DDP) else model
+    return getattr(base_model, 'latest_activated_states', None)
 # --- End DDP Setup ---
 
 
@@ -588,14 +595,19 @@ if __name__=='__main__':
             if args.model == 'ctm':
                 predictions, certainties, synchronisation = model(inputs)
                 retentions = get_latest_retention(model)
+                attention_reads = get_latest_attention_read(model)
+                activations = get_latest_activations(model)
                 loss, where_most_certain = image_classification_loss(
                     predictions,
                     certainties,
                     targets,
                     use_most_certain=True,
                     retentions=retentions,
+                    attention_reads=attention_reads,
+                    activations=activations,
+                    look_end_frac=args.look_end_frac,
                     dwell_start_frac=args.dwell_start_frac,
-                    lambda_mono=args.lambda_mono,
+                    lambda_gate=args.lambda_gate,
                 )
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
@@ -683,14 +695,19 @@ if __name__=='__main__':
                         if args.model == 'ctm':
                             predictions, certainties, _ = model(inputs)
                             retentions = get_latest_retention(model)
+                            attention_reads = get_latest_attention_read(model)
+                            activations = get_latest_activations(model)
                             loss_eval, where_most_certain = image_classification_loss(
                                 predictions,
                                 certainties,
                                 targets,
                                 use_most_certain=True,
                                 retentions=retentions,
+                                attention_reads=attention_reads,
+                                activations=activations,
+                                look_end_frac=args.look_end_frac,
                                 dwell_start_frac=args.dwell_start_frac,
-                                lambda_mono=args.lambda_mono,
+                                lambda_gate=args.lambda_gate,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_train_correct_certain += (preds_eval == targets).sum()
@@ -755,14 +772,19 @@ if __name__=='__main__':
                         if args.model == 'ctm':
                             predictions, certainties, _ = model(inputs)
                             retentions = get_latest_retention(model)
+                            attention_reads = get_latest_attention_read(model)
+                            activations = get_latest_activations(model)
                             loss_eval, where_most_certain = image_classification_loss(
                                 predictions,
                                 certainties,
                                 targets,
                                 use_most_certain=True,
                                 retentions=retentions,
+                                attention_reads=attention_reads,
+                                activations=activations,
+                                look_end_frac=args.look_end_frac,
                                 dwell_start_frac=args.dwell_start_frac,
-                                lambda_mono=args.lambda_mono,
+                                lambda_gate=args.lambda_gate,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_test_correct_certain += (preds_eval == targets).sum()

@@ -61,8 +61,11 @@ def image_classification_loss(predictions,
                               targets,
                               use_most_certain=True,
                               retentions=None,
+                              attention_reads=None,
+                              activations=None,
+                              look_end_frac=0.5,
                               dwell_start_frac=0.33,
-                              lambda_mono=0.01):
+                              lambda_gate=0.01):
     """
     Computes the maze loss with auto-extending cirriculum.
 
@@ -76,10 +79,11 @@ def image_classification_loss(predictions,
     and a monotonicity regulariser over r_t is added.
     """
     targets_expanded = torch.repeat_interleave(targets.unsqueeze(-1), predictions.size(-1), -1)
-    # Losses are of shape [B, internal_ticks]
     losses = nn.CrossEntropyLoss(reduction='none')(predictions, targets_expanded)
     T = predictions.size(-1)
     batch_size = predictions.size(0)
+    device = predictions.device
+    dtype = predictions.dtype
 
     loss_index_1 = losses.argmin(dim=1)
     certainty_indices = certainties[:, 1].argmax(-1)
@@ -92,31 +96,70 @@ def image_classification_loss(predictions,
 
     tick_indices = [loss_index_1, loss_index_2]
 
-    dwell_index = None
-    if retentions is not None:
-        dwell_start_frac = float(dwell_start_frac)
-        dwell_start = int(math.floor(dwell_start_frac * T))
-        dwell_start = max(0, min(T - 1, dwell_start))
-        dwell_region = retentions[:, dwell_start:]
-        dwell_region = dwell_region if dwell_region.numel() else retentions[:, -1:]
-        dwell_relative = dwell_region.argmax(dim=1)
-        dwell_index = dwell_relative + dwell_start
-        tick_indices.append(dwell_index)
+    if retentions is None or attention_reads is None or activations is None:
+        tick_stack = torch.stack(tick_indices, dim=1)
+        selection_mask = losses.new_zeros(batch_size, T)
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1).expand_as(tick_stack)
+        selection_mask[batch_idx, tick_stack] = 1.0
+        selection_counts = selection_mask.sum(dim=1).clamp_min(1.0)
+        fallback_loss = ((losses * selection_mask).sum(dim=1) / selection_counts).mean()
+        return fallback_loss, where_most_certain
 
-    tick_stack = torch.stack(tick_indices, dim=1)
+    tick_nums = torch.arange(1, T + 1, device=device)
+    look_limit = max(2, min(T, int(math.floor(look_end_frac * T))))
+    if look_limit < 2:
+        look_limit = min(T, 2)
+    look_mask = (tick_nums >= 2) & (tick_nums <= look_limit)
+    dwell_start = max(2, min(T, int(math.ceil(dwell_start_frac * T))))
+    if dwell_start > T:
+        dwell_start = T
+    dwell_mask = tick_nums >= dwell_start
+    if not look_mask.any():
+        look_mask = tick_nums >= 1
+    if not dwell_mask.any():
+        dwell_mask = tick_nums >= 1
+
+    attn_curr = attention_reads[:, 1:, :]
+    attn_prev = attention_reads[:, :-1, :]
+    attn_dot = (attn_curr * attn_prev).sum(dim=-1)
+    attn_norm = attn_curr.norm(dim=-1) * attn_prev.norm(dim=-1)
+    attn_sim = torch.zeros_like(attn_dot)
+    valid_attn = attn_norm > 0
+    attn_sim[valid_attn] = (attn_dot[valid_attn] / attn_norm[valid_attn].clamp_min(1e-8)).clamp(-1.0, 1.0)
+    novelty = torch.zeros(batch_size, T, device=device, dtype=dtype)
+    novelty[:, 1:] = 1 - attn_sim
+
+    act_curr = activations[:, 1:, :]
+    act_prev = activations[:, :-1, :]
+    act_dot = (act_curr * act_prev).sum(dim=-1)
+    act_norm = act_curr.norm(dim=-1) * act_prev.norm(dim=-1)
+    act_sim = torch.zeros_like(act_dot)
+    valid_act = act_norm > 0
+    act_sim[valid_act] = (act_dot[valid_act] / act_norm[valid_act].clamp_min(1e-8)).clamp(-1.0, 1.0)
+    hypothesis_change = torch.zeros(batch_size, T, device=device, dtype=dtype)
+    hypothesis_change[:, 1:] = 1 - act_sim
+
+    look_scores = novelty.clone()
+    dwell_scores = hypothesis_change.clone()
+    look_scores[:, ~look_mask] = float('-inf')
+    dwell_scores[:, ~dwell_mask] = float('-inf')
+    t_look = look_scores.argmax(dim=1)
+    t_dwell = dwell_scores.argmax(dim=1)
+
+    batch_idx = torch.arange(batch_size, device=device)
+    tick_stack = torch.stack(tick_indices + [t_look, t_dwell], dim=1)
     selection_mask = losses.new_zeros(batch_size, T)
-    batch_indexer = torch.arange(batch_size, device=predictions.device).unsqueeze(1).expand_as(tick_stack)
-    selection_mask[batch_indexer, tick_stack] = 1.0
+    gather_indexer = batch_idx.unsqueeze(1).expand_as(tick_stack)
+    selection_mask[gather_indexer, tick_stack] = 1.0
     selection_counts = selection_mask.sum(dim=1).clamp_min(1.0)
     task_loss = ((losses * selection_mask).sum(dim=1) / selection_counts).mean()
 
-    mono_loss = torch.tensor(0.0, device=predictions.device, dtype=losses.dtype)
-    if retentions is not None and lambda_mono:
-        diffs = torch.relu(retentions[:, :-1] - retentions[:, 1:])
-        mono_loss = diffs.sum(dim=1).mean()
-        task_loss = task_loss + lambda_mono * mono_loss
+    r_look = retentions[batch_idx, t_look]
+    r_dwell = retentions[batch_idx, t_dwell]
+    gate_reg = lambda_gate * ((r_look ** 2).mean() + ((1 - r_dwell) ** 2).mean())
 
-    return task_loss, where_most_certain
+    total_loss = task_loss + gate_reg
+    return total_loss, where_most_certain
 
 def maze_loss(predictions, certainties, targets, cirriculum_lookahead=5, use_most_certain=True):
     """

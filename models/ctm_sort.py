@@ -123,4 +123,7 @@ class ContinuousThoughtMachineSORT(ContinuousThoughtMachine):
         # --- Return Values ---
         if track:
             return predictions, certainties, np.array(synch_out_tracking), np.array(pre_activations_tracking), np.array(post_activations_tracking), np.array(attention_tracking)
+        self.latest_retention = None
+        self.latest_attention_read = None
+        self.latest_activated_states = None
         return predictions, certainties, synchronisation_out

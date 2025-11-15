@@ -189,4 +189,7 @@ class ContinuousThoughtMachineRL(ContinuousThoughtMachine):
         # --- Return Values ---
         if track:
             return synchronisation_out, hidden_states, np.array(pre_activations_tracking), np.array(post_activations_tracking)
+        self.latest_retention = None
+        self.latest_attention_read = None
+        self.latest_activated_states = None
         return synchronisation_out, hidden_states
