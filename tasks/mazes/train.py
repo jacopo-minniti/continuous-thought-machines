@@ -87,6 +87,9 @@ def parse_args():
     # Task Specific Args (Common to all models for this task)
     parser.add_argument('--maze_route_length', type=int, default=100, help='Length to truncate targets.')
     parser.add_argument('--cirriculum_lookahead', type=int, default=5, help='How far to look ahead for cirriculum.')
+    parser.add_argument('--look_end_frac', type=float, default=0.5, help='Fraction of ticks defining end of exploration window (CTM only).')
+    parser.add_argument('--dwell_start_frac', type=float, default=0.33, help='Fraction of ticks to begin the dwell window (CTM only).')
+    parser.add_argument('--lambda_gate', type=float, default=0.01, help='Weight for the gate regularizer (CTM only).')
 
 
     # Training
@@ -129,6 +132,18 @@ def parse_args():
 
     args = parser.parse_args()
     return args
+
+def get_base_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+def get_latest_retention(model):
+    return getattr(get_base_model(model), 'latest_retention', None)
+
+def get_latest_attention_read(model):
+    return getattr(get_base_model(model), 'latest_attention_read', None)
+
+def get_latest_activations(model):
+    return getattr(get_base_model(model), 'latest_activated_states', None)
 
 
 if __name__=='__main__':
@@ -378,7 +393,22 @@ if __name__=='__main__':
                     predictions_raw, certainties, synchronisation = model(inputs)
                     # Reshape predictions: (B, SeqLength, 5, Ticks)
                     predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1))
-                    loss, where_most_certain, upto_where = maze_loss(predictions, certainties, targets, cirriculum_lookahead=args.cirriculum_lookahead, use_most_certain=True)
+                    retentions = get_latest_retention(model)
+                    attention_reads = get_latest_attention_read(model)
+                    activations = get_latest_activations(model)
+                    loss, where_most_certain, upto_where = maze_loss(
+                        predictions,
+                        certainties,
+                        targets,
+                        cirriculum_lookahead=args.cirriculum_lookahead,
+                        use_most_certain=True,
+                        retentions=retentions,
+                        attention_reads=attention_reads,
+                        activations=activations,
+                        look_end_frac=args.look_end_frac,
+                        dwell_start_frac=args.dwell_start_frac,
+                        lambda_gate=args.lambda_gate,
+                    )
                     # Accuracy uses predictions[B, S, C, T] indexed at where_most_certain[B] -> gives (B, S, C) -> argmax(2) -> (B,S)
                     accuracy_finegrained = (predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] == targets).float().mean().item()
 
@@ -480,7 +510,22 @@ if __name__=='__main__':
                             if args.model == 'ctm':
                                 predictions_raw, certainties, _ = model(inputs)
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1)) # B,S,C,T
-                                loss, where_most_certain, _ = maze_loss(predictions, certainties, targets, use_most_certain=True)
+                                retentions = get_latest_retention(model)
+                                attention_reads = get_latest_attention_read(model)
+                                activations = get_latest_activations(model)
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions,
+                                    certainties,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=True,
+                                    retentions=retentions,
+                                    attention_reads=attention_reads,
+                                    activations=activations,
+                                    look_end_frac=args.look_end_frac,
+                                    dwell_start_frac=args.dwell_start_frac,
+                                    lambda_gate=args.lambda_gate,
+                                )
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S,C,T -> argmax class -> B,S,T
                                 pred_at_certain = predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] # B,S
                                 all_predictions_most_certain_list.append(pred_at_certain.detach().cpu().numpy())
@@ -488,7 +533,13 @@ if __name__=='__main__':
                             elif args.model == 'lstm':
                                 predictions_raw, certainties, _ = model(inputs)
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1)) # B,S,C,T
-                                loss, where_most_certain, _ = maze_loss(predictions, certainties, targets, use_most_certain=False) # where = -1
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions,
+                                    certainties,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=False,
+                                ) # where = -1
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S,C,T
                                 pred_at_certain = predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] # B,S (at last tick)
                                 all_predictions_most_certain_list.append(pred_at_certain.detach().cpu().numpy())
@@ -496,7 +547,13 @@ if __name__=='__main__':
                             elif args.model == 'ff':
                                 predictions_raw = model(inputs) # B, S*C
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5) # B,S,C
-                                loss, where_most_certain, _ = maze_loss(predictions.unsqueeze(-1), None, targets, use_most_certain=False) # where = -1
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions.unsqueeze(-1),
+                                    None,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=False,
+                                ) # where = -1
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S
                                 all_predictions_most_certain_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S (same as above for FF)
 
@@ -544,7 +601,22 @@ if __name__=='__main__':
                             if args.model == 'ctm':
                                 predictions_raw, certainties, _ = model(inputs)
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1)) # B,S,C,T
-                                loss, where_most_certain, _ = maze_loss(predictions, certainties, targets, use_most_certain=True)
+                                retentions = get_latest_retention(model)
+                                attention_reads = get_latest_attention_read(model)
+                                activations = get_latest_activations(model)
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions,
+                                    certainties,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=True,
+                                    retentions=retentions,
+                                    attention_reads=attention_reads,
+                                    activations=activations,
+                                    look_end_frac=args.look_end_frac,
+                                    dwell_start_frac=args.dwell_start_frac,
+                                    lambda_gate=args.lambda_gate,
+                                )
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S,T
                                 pred_at_certain = predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] # B,S
                                 all_predictions_most_certain_list.append(pred_at_certain.detach().cpu().numpy())
@@ -552,7 +624,13 @@ if __name__=='__main__':
                             elif args.model == 'lstm':
                                 predictions_raw, certainties, _ = model(inputs)
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5, predictions_raw.size(-1)) # B,S,C,T
-                                loss, where_most_certain, _ = maze_loss(predictions, certainties, targets, use_most_certain=False) # where = -1
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions,
+                                    certainties,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=False,
+                                ) # where = -1
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S,T
                                 pred_at_certain = predictions.argmax(2)[torch.arange(predictions.size(0), device=predictions.device), :, where_most_certain] # B,S (at last tick)
                                 all_predictions_most_certain_list.append(pred_at_certain.detach().cpu().numpy())
@@ -560,7 +638,13 @@ if __name__=='__main__':
                             elif args.model == 'ff':
                                 predictions_raw = model(inputs) # B, S*C
                                 predictions = predictions_raw.reshape(predictions_raw.size(0), -1, 5) # B,S,C
-                                loss, where_most_certain, _ = maze_loss(predictions.unsqueeze(-1), None, targets, use_most_certain=False) # where = -1
+                                loss, where_most_certain, _ = maze_loss(
+                                    predictions.unsqueeze(-1),
+                                    None,
+                                    targets,
+                                    cirriculum_lookahead=args.cirriculum_lookahead,
+                                    use_most_certain=False,
+                                ) # where = -1
                                 all_predictions_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S
                                 all_predictions_most_certain_list.append(predictions.argmax(2).detach().cpu().numpy()) # B,S (same as above for FF)
 
