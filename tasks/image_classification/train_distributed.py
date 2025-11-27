@@ -79,6 +79,7 @@ def parse_args():
                                  'learnable-fourier',
                                  'multi-learnable-fourier',
                                  'custom-rotational'])
+    parser.add_argument('--ablation_type', type=str, default='none', choices=['none', 'no_retention', 'no_loss'], help='Ablation study type.')
     # CTM specific
     parser.add_argument('--synapse_depth', type=int, default=4, help='Depth of U-NET model for synapse. 1=linear, no unet (CTM only).')
     parser.add_argument('--n_synch_out', type=int, default=32, help='Number of neurons to use for output synch (CTM only).')
@@ -363,6 +364,7 @@ if __name__=='__main__':
             dropout_nlm=args.dropout_nlm,
             neuron_select_type=args.neuron_select_type,
             n_random_pairing_self=args.n_random_pairing_self,
+            ablation_type=args.ablation_type,
         ).to(device)
     elif args.model == 'lstm':
         model_base = LSTMBaseline(
@@ -613,6 +615,11 @@ if __name__=='__main__':
                 retentions = get_latest_retention(model)
                 attention_reads = get_latest_attention_read(model)
                 activations = get_latest_activations(model)
+                if args.ablation_type == 'no_loss':
+                    retentions = None
+                    attention_reads = None
+                    activations = None
+                
                 loss, where_most_certain = image_classification_loss(
                     predictions,
                     certainties,
@@ -623,7 +630,7 @@ if __name__=='__main__':
                     activations=activations,
                     look_end_frac=args.look_end_frac,
                     dwell_start_frac=args.dwell_start_frac,
-                    lambda_gate=args.lambda_gate,
+                    lambda_gate=args.lambda_gate if args.ablation_type != 'no_retention' else 0.0,
                 )
             elif args.model == 'lstm':
                 predictions, certainties, synchronisation = model(inputs)
@@ -713,6 +720,12 @@ if __name__=='__main__':
                             retentions = get_latest_retention(model)
                             attention_reads = get_latest_attention_read(model)
                             activations = get_latest_activations(model)
+                            
+                            if args.ablation_type == 'no_loss':
+                                retentions = None
+                                attention_reads = None
+                                activations = None
+
                             loss_eval, where_most_certain = image_classification_loss(
                                 predictions,
                                 certainties,
@@ -723,7 +736,7 @@ if __name__=='__main__':
                                 activations=activations,
                                 look_end_frac=args.look_end_frac,
                                 dwell_start_frac=args.dwell_start_frac,
-                                lambda_gate=args.lambda_gate,
+                                lambda_gate=args.lambda_gate if args.ablation_type != 'no_retention' else 0.0,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_train_correct_certain += (preds_eval == targets).sum()
@@ -790,6 +803,12 @@ if __name__=='__main__':
                             retentions = get_latest_retention(model)
                             attention_reads = get_latest_attention_read(model)
                             activations = get_latest_activations(model)
+                            
+                            if args.ablation_type == 'no_loss':
+                                retentions = None
+                                attention_reads = None
+                                activations = None
+
                             loss_eval, where_most_certain = image_classification_loss(
                                 predictions,
                                 certainties,
@@ -800,7 +819,7 @@ if __name__=='__main__':
                                 activations=activations,
                                 look_end_frac=args.look_end_frac,
                                 dwell_start_frac=args.dwell_start_frac,
-                                lambda_gate=args.lambda_gate,
+                                lambda_gate=args.lambda_gate if args.ablation_type != 'no_retention' else 0.0,
                             )
                             preds_eval = predictions.argmax(1)[torch.arange(predictions.size(0), device=device), where_most_certain]
                             total_test_correct_certain += (preds_eval == targets).sum()

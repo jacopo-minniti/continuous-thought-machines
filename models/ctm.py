@@ -98,6 +98,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                  dropout_nlm=None,
                  neuron_select_type='random-pairing',  
                  n_random_pairing_self=0,
+                 ablation_type='none',
                  ):
         super(ContinuousThoughtMachine, self).__init__()
 
@@ -115,6 +116,7 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.neuron_select_type = neuron_select_type
         self.memory_length = memory_length
         dropout_nlm = dropout if dropout_nlm is None else dropout_nlm
+        self.ablation_type = ablation_type
 
         # --- Assertions ---
         self.verify_args()
@@ -599,7 +601,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
             # --- Calculate Synchronisation for Input Data Interaction ---
             synchronisation_action, decay_alpha_action, decay_beta_action = self.compute_synchronisation(activated_state, decay_alpha_action, decay_beta_action, r_action, synch_type='action')
 
-            retention = self.compute_retention(synchronisation_action)
+            if self.ablation_type == 'no_retention':
+                retention = torch.zeros(B, 1, device=device, dtype=activated_state.dtype)
+            else:
+                retention = self.compute_retention(synchronisation_action)
             retentions[:, stepi] = retention.squeeze(-1)
 
             # --- Interact with Data via Attention ---
@@ -611,7 +616,10 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
                 attn_out = attn_out.squeeze(1)
                 attn_read = self.project_observation(attn_out)
 
-            synapse_input = retention * activated_state + (1 - retention) * attn_read
+            if self.ablation_type == 'no_retention':
+                synapse_input = torch.cat([activated_state, attn_read], dim=-1)
+            else:
+                synapse_input = retention * activated_state + (1 - retention) * attn_read
             attention_reads[:, stepi] = attn_read
 
             # --- Apply Synapses ---
