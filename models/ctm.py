@@ -147,6 +147,9 @@ class ContinuousThoughtMachine(nn.Module, PyTorchModelHubMixin):
         self.perceptual_gate = None
         if self.synch_representation_size_action:
             gate_hidden_dim = min(256, max(32, self.synch_representation_size_action))
+        if self.ablation_type == 'no_retention':
+            self.perceptual_gate = None
+        else:
             self.perceptual_gate = nn.Sequential(
                 nn.LayerNorm(self.synch_representation_size_action),
                 nn.Linear(self.synch_representation_size_action, gate_hidden_dim),
