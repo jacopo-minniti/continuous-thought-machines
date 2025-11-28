@@ -75,19 +75,19 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=0,
+        default=1,
         help="PRNG seed.",
     )
     parser.add_argument(
         "--low_threshold",
         type=float,
-        default=0.1,
+        default=0.3,
         help="Retention below this counts as evidence-seeking (for stats).",
     )
     parser.add_argument(
         "--high_threshold",
         type=float,
-        default=0.9,
+        default=0.7,
         help="Retention above this counts as dwell-heavy (for stats).",
     )
     return parser.parse_args()
