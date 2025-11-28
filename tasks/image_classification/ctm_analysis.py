@@ -254,14 +254,15 @@ def plot_tick_panels(results: Dict[str, Dict], out_path: str):
         ticks = np.arange(len(data["tick_counts"]))
         probs = data["tick_counts"] / max(1, data["tick_counts"].sum())
         probs_ce = data["tick_counts_ce"] / max(1, data["tick_counts_ce"].sum())
-        ax.bar(ticks - 0.2, probs, width=0.4, color="#1f77b4", alpha=0.75, label="argmax certainty")
-        ax.bar(ticks + 0.2, probs_ce, width=0.4, color="#ff7f0e", alpha=0.55, label="argmin CE")
+        ax.bar(ticks, probs, width=0.8, color="#1f77b4", alpha=0.65, label="argmax certainty")
+        ax.bar(ticks, probs_ce, width=0.8, color="#ff7f0e", alpha=0.35, label="argmin CE")
         ax.set_title(
             f"{label} (acc={data['accuracy']:.3f}, mean_certain={data['mean_tick']:.1f}, mean_ce={data['mean_tick_ce']:.1f})"
         )
         ax.set_xlabel("Tick")
         ax.set_ylabel("Frac")
-        ax.legend(fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7)
 
     # Hide unused subplots if any
     for idx in range(len(labels), rows * cols):
