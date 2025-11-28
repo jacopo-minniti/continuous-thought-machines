@@ -163,6 +163,7 @@ def evaluate_run(
 ) -> Dict:
     T = model.iterations
     tick_counts = torch.zeros(T, dtype=torch.long)
+    tick_counts_ce = torch.zeros(T, dtype=torch.long)
     per_tick_correct = torch.zeros(T, dtype=torch.long)
     per_tick_seen = torch.zeros(T, dtype=torch.long)
     total_correct = 0
@@ -180,8 +181,17 @@ def evaluate_run(
             predictions, certainties, _ = model(images)
 
         chosen_ticks = certainties[:, 1].argmax(-1)
+        # Lowest CE tick per sample
+        preds_flat = predictions.permute(0, 2, 1).reshape(-1, predictions.size(1))  # (B*T, C)
+        labels_flat = labels.unsqueeze(1).expand(-1, T).reshape(-1)  # (B*T,)
+        ce_flat = torch.nn.functional.cross_entropy(preds_flat, labels_flat, reduction="none")
+        ce_per_tick = ce_flat.view(-1, T)
+        ce_min_ticks = ce_per_tick.argmin(dim=1)
+
         batch_counts = torch.bincount(chosen_ticks.detach().cpu(), minlength=T)
         tick_counts += batch_counts
+        batch_counts_ce = torch.bincount(ce_min_ticks.detach().cpu(), minlength=T)
+        tick_counts_ce += batch_counts_ce
 
         gather_idx = chosen_ticks.view(-1, 1, 1).expand(-1, predictions.size(1), 1)
         logits_at_tick = torch.gather(predictions, dim=2, index=gather_idx).squeeze(-1)
@@ -201,6 +211,7 @@ def evaluate_run(
 
     accuracy = total_correct / max(1, total_seen)
     mean_tick = float((tick_counts.float() * torch.arange(T)).sum() / max(1, tick_counts.sum()))
+    mean_tick_ce = float((tick_counts_ce.float() * torch.arange(T)).sum() / max(1, tick_counts_ce.sum()))
 
     retention_result = None
     if all_retentions:
@@ -214,8 +225,10 @@ def evaluate_run(
 
     return {
         "tick_counts": tick_counts.numpy(),
+        "tick_counts_ce": tick_counts_ce.numpy(),
         "accuracy": accuracy,
         "mean_tick": mean_tick,
+        "mean_tick_ce": mean_tick_ce,
         "per_tick_acc": (per_tick_correct.float() / per_tick_seen.clamp_min(1)).numpy(),
         "retention": retention_result,
         "samples": total_seen,
@@ -240,10 +253,15 @@ def plot_tick_panels(results: Dict[str, Dict], out_path: str):
         data = results[label]
         ticks = np.arange(len(data["tick_counts"]))
         probs = data["tick_counts"] / max(1, data["tick_counts"].sum())
-        ax.bar(ticks, probs, color="#1f77b4", alpha=0.85)
-        ax.set_title(f"{label} (acc={data['accuracy']:.3f}, mean={data['mean_tick']:.1f})")
+        probs_ce = data["tick_counts_ce"] / max(1, data["tick_counts_ce"].sum())
+        ax.bar(ticks - 0.2, probs, width=0.4, color="#1f77b4", alpha=0.75, label="argmax certainty")
+        ax.bar(ticks + 0.2, probs_ce, width=0.4, color="#ff7f0e", alpha=0.55, label="argmin CE")
+        ax.set_title(
+            f"{label} (acc={data['accuracy']:.3f}, mean_certain={data['mean_tick']:.1f}, mean_ce={data['mean_tick_ce']:.1f})"
+        )
         ax.set_xlabel("Tick")
         ax.set_ylabel("Frac")
+        ax.legend(fontsize=8)
 
     # Hide unused subplots if any
     for idx in range(len(labels), rows * cols):
