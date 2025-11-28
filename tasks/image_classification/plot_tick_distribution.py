@@ -35,6 +35,8 @@ def instantiate_model(saved_args, out_dims, device):
         saved_args.backbone_type = f'{saved_args.resnet_type}-{getattr(saved_args, "resnet_feature_scales", [4])[-1]}'
     if not hasattr(saved_args, 'neuron_select_type'):
         saved_args.neuron_select_type = 'first-last'
+    if not hasattr(saved_args, 'ablation_type'):
+        saved_args.ablation_type = 'none'
 
     model = ContinuousThoughtMachine(
         iterations=saved_args.iterations,
@@ -56,6 +58,7 @@ def instantiate_model(saved_args, out_dims, device):
         dropout_nlm=getattr(saved_args, 'dropout_nlm', None),
         neuron_select_type=saved_args.neuron_select_type,
         n_random_pairing_self=getattr(saved_args, 'n_random_pairing_self', 0),
+        ablation_type=saved_args.ablation_type,
     ).to(device)
     return model
 
