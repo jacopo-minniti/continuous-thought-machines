@@ -90,6 +90,12 @@ def parse_args():
         default=0.7,
         help="Retention above this counts as dwell-heavy (for stats).",
     )
+    parser.add_argument(
+        "--certainty_threshold",
+        type=float,
+        default=0.9,
+        help="Earliest tick chosen when certainty >= this threshold (else fallback to final tick).",
+    )
     return parser.parse_args()
 
 
@@ -160,14 +166,17 @@ def evaluate_run(
     max_batches: int,
     low_thr: float,
     high_thr: float,
+    certainty_thr: float,
 ) -> Dict:
     T = model.iterations
     tick_counts = torch.zeros(T, dtype=torch.long)
     tick_counts_ce = torch.zeros(T, dtype=torch.long)
+    tick_counts_first_cert = torch.zeros(T, dtype=torch.long)
     per_tick_correct = torch.zeros(T, dtype=torch.long)
     per_tick_seen = torch.zeros(T, dtype=torch.long)
     total_correct = 0
     total_seen = 0
+    total_correct_first_cert = 0
     all_retentions: List[torch.Tensor] = []
 
     for batch_idx, (images, labels) in enumerate(loader):
@@ -188,10 +197,19 @@ def evaluate_run(
         ce_per_tick = ce_flat.view(-1, T)
         ce_min_ticks = ce_per_tick.argmin(dim=1)
 
+        # Earliest tick above certainty threshold (fallback to final tick)
+        cert_track = certainties[:, 1, :]
+        above = cert_track >= certainty_thr
+        first_hit = above.float().argmax(dim=1)  # returns 0 if none, so fix
+        has_hit = above.any(dim=1)
+        first_hit = torch.where(has_hit, first_hit, torch.full_like(first_hit, T - 1))
+
         batch_counts = torch.bincount(chosen_ticks.detach().cpu(), minlength=T)
         tick_counts += batch_counts
         batch_counts_ce = torch.bincount(ce_min_ticks.detach().cpu(), minlength=T)
         tick_counts_ce += batch_counts_ce
+        batch_counts_fc = torch.bincount(first_hit.detach().cpu(), minlength=T)
+        tick_counts_first_cert += batch_counts_fc
 
         gather_idx = chosen_ticks.view(-1, 1, 1).expand(-1, predictions.size(1), 1)
         logits_at_tick = torch.gather(predictions, dim=2, index=gather_idx).squeeze(-1)
@@ -199,6 +217,11 @@ def evaluate_run(
 
         total_correct += (preds == labels).sum().item()
         total_seen += labels.size(0)
+
+        gather_idx_fc = first_hit.view(-1, 1, 1).expand(-1, predictions.size(1), 1)
+        logits_at_fc = torch.gather(predictions, dim=2, index=gather_idx_fc).squeeze(-1)
+        preds_fc = logits_at_fc.argmax(dim=1)
+        total_correct_first_cert += (preds_fc == labels).sum().item()
 
         per_tick_preds = predictions.argmax(1)  # (B, T)
         for t in range(T):
@@ -212,6 +235,10 @@ def evaluate_run(
     accuracy = total_correct / max(1, total_seen)
     mean_tick = float((tick_counts.float() * torch.arange(T)).sum() / max(1, tick_counts.sum()))
     mean_tick_ce = float((tick_counts_ce.float() * torch.arange(T)).sum() / max(1, tick_counts_ce.sum()))
+    accuracy_first_certain = total_correct_first_cert / max(1, total_seen)
+    mean_tick_first_certain = float(
+        (tick_counts_first_cert.float() * torch.arange(T)).sum() / max(1, tick_counts_first_cert.sum())
+    )
 
     retention_result = None
     if all_retentions:
@@ -226,9 +253,12 @@ def evaluate_run(
     return {
         "tick_counts": tick_counts.numpy(),
         "tick_counts_ce": tick_counts_ce.numpy(),
+        "tick_counts_first_certain": tick_counts_first_cert.numpy(),
         "accuracy": accuracy,
         "mean_tick": mean_tick,
         "mean_tick_ce": mean_tick_ce,
+        "accuracy_first_certain": accuracy_first_certain,
+        "mean_tick_first_certain": mean_tick_first_certain,
         "per_tick_acc": (per_tick_correct.float() / per_tick_seen.clamp_min(1)).numpy(),
         "retention": retention_result,
         "samples": total_seen,
@@ -272,6 +302,36 @@ def plot_tick_panels(results: Dict[str, Dict], out_path: str):
     fig.tight_layout()
     fig.savefig(out_path)
     print(f"[tick panels] saved -> {os.path.abspath(out_path)}")
+
+
+def plot_first_certain_panels(results: Dict[str, Dict], out_path: str):
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    labels = list(results.keys())
+    rows, cols = subplot_grid(len(labels))
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols + 1, 3 * rows + 1), dpi=200, squeeze=False)
+
+    for idx, label in enumerate(labels):
+        r, c = divmod(idx, cols)
+        ax = axes[r][c]
+        data = results[label]
+        ticks = np.arange(len(data["tick_counts_first_certain"]))
+        probs_fc = data["tick_counts_first_certain"] / max(1, data["tick_counts_first_certain"].sum())
+        ax.bar(ticks, probs_fc, width=0.8, color="#2ca02c", alpha=0.65, label="first tick ≥ certainty thr")
+        ax.set_title(
+            f"{label} (acc_first={data['accuracy_first_certain']:.3f}, mean_tick={data['mean_tick_first_certain']:.1f})"
+        )
+        ax.set_xlabel("Tick")
+        ax.set_ylabel("Frac")
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7)
+
+    for idx in range(len(labels), rows * cols):
+        r, c = divmod(idx, cols)
+        fig.delaxes(axes[r][c])
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    print(f"[first certainty panels] saved -> {os.path.abspath(out_path)}")
 
 
 def plot_per_tick_accuracy_panels(results: Dict[str, Dict], out_path: str):
@@ -376,6 +436,7 @@ def main():
             args.max_batches,
             args.low_threshold,
             args.high_threshold,
+            args.certainty_threshold,
         )
         results[label] = eval_result
         print(
@@ -391,6 +452,7 @@ def main():
     plot_tick_panels(results, os.path.join(args.out_dir, "tick_distribution_panels.png"))
     plot_per_tick_accuracy_panels(results, os.path.join(args.out_dir, "per_tick_accuracy_panels.png"))
     plot_retention_panels(results, os.path.join(args.out_dir, "retention_panels.png"))
+    plot_first_certain_panels(results, os.path.join(args.out_dir, "first_certainty_panels.png"))
 
     # Save raw metrics
     torch.save(results, os.path.join(args.out_dir, "metrics.pt"))
